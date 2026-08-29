@@ -16,7 +16,21 @@ pub enum Event {
     Error(String),
 }
 
-pub fn start(source: PathBuf, host: String, instances: usize) -> Receiver<Event> {
+pub enum Source {
+    File(PathBuf),
+    Python(String),
+}
+
+impl Source {
+    pub fn is_interpreted(&self) -> bool {
+        match self {
+            Self::File(path) => path.extension().is_some_and(|extension| extension == "py"),
+            Self::Python(_) => true,
+        }
+    }
+}
+
+pub fn start(source: Source, host: String, instances: usize) -> Receiver<Event> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         if let Err(error) = run(&source, &host, instances, &sender) {
@@ -26,7 +40,7 @@ pub fn start(source: PathBuf, host: String, instances: usize) -> Receiver<Event>
     receiver
 }
 
-fn run(source: &Path, host: &str, instances: usize, sender: &Sender<Event>) -> io::Result<()> {
+fn run(source: &Source, host: &str, instances: usize, sender: &Sender<Event>) -> io::Result<()> {
     let started = Instant::now();
     let temporary = temporary_directory()?;
     let result = execute(source, host, instances, sender, &temporary);
@@ -37,17 +51,18 @@ fn run(source: &Path, host: &str, instances: usize, sender: &Sender<Event>) -> i
 }
 
 fn execute(
-    source: &Path,
+    source: &Source,
     host: &str,
     instances: usize,
     sender: &Sender<Event>,
     temporary: &Path,
 ) -> io::Result<()> {
     let program = temporary.join("program");
+    let inline = temporary.join("source.py");
     let api_key = env::var("JIO_API_KEY")
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "JIO_API_KEY is required"))?;
-    let (workload, runtime) = match source.extension().and_then(|value| value.to_str()) {
-        Some("rs") => {
+    let (workload, runtime) = match source {
+        Source::File(source) if source.extension().is_some_and(|value| value == "rs") => {
             send(
                 sender,
                 Event::Phase("Cross-compiling Rust for Linux".into()),
@@ -75,9 +90,14 @@ fn execute(
             send(sender, Event::Compiled(compile_started.elapsed()))?;
             (program.as_path(), "native-elf-v0")
         }
-        Some("py") => {
+        Source::File(source) if source.extension().is_some_and(|value| value == "py") => {
             send(sender, Event::Phase("Preparing Python source".into()))?;
-            (source, "python3.12-source-v0")
+            (source.as_path(), "python3.12-source-v0")
+        }
+        Source::Python(source) => {
+            send(sender, Event::Phase("Preparing Python source".into()))?;
+            fs::write(&inline, source)?;
+            (inline.as_path(), "python3.12-source-v0")
         }
         _ => {
             return Err(io::Error::new(

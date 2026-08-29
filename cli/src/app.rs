@@ -7,14 +7,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Gauge, Paragraph, Row, Table};
 use ratatui::{DefaultTerminal, Frame};
 use std::io;
-use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
-pub fn run(source: PathBuf, host: String, instances: usize) -> io::Result<()> {
-    let interpreted = source
-        .extension()
-        .is_some_and(|extension| extension == "py");
+pub fn run(source: runner::Source, host: String, instances: usize) -> io::Result<()> {
+    let interpreted = source.is_interpreted();
     let events = runner::start(source, host.clone(), instances);
     let mut terminal = ratatui::try_init()?;
     let result = App::new(host, instances, interpreted).run(&mut terminal, events);
