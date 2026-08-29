@@ -4,7 +4,7 @@ use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const MAX_INSTANCES: usize = 64;
+pub const MAX_INSTANCES: usize = 64;
 const MAX_ERROR_BYTES: u64 = 64 * 1024;
 const REMOTE_RUNNER: &[u8] = include_bytes!("remote-run.sh");
 

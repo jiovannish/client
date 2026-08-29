@@ -53,6 +53,15 @@ fn options() -> io::Result<(PathBuf, String, usize)> {
             "missing --host <user@address> (or JIO_HOST)",
         )
     })?;
+    if !(1..=jio_client::MAX_INSTANCES).contains(&instances) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "instance count must be between 1 and {}",
+                jio_client::MAX_INSTANCES
+            ),
+        ));
+    }
     Ok((source, host, instances))
 }
 

@@ -43,11 +43,12 @@ fn execute(
     sender: &Sender<Event>,
     temporary: &Path,
 ) -> io::Result<()> {
+    let program = temporary.join("program");
+    let request = RunRequest::new(host, &program, instances)?;
     send(
         sender,
         Event::Phase("Cross-compiling Rust for Linux".into()),
     )?;
-    let program = temporary.join("program");
     let compile_started = Instant::now();
     let compile = Command::new("rustup")
         .arg("run")
@@ -70,7 +71,6 @@ fn execute(
     require_success("rustc", &compile)?;
     send(sender, Event::Compiled(compile_started.elapsed()))?;
 
-    let request = RunRequest::new(host, &program, instances)?;
     let execution = jio_client::run(&request, |event| match event {
         ClientEvent::Phase(phase) => send(sender, Event::Phase(phase)),
         ClientEvent::Done(_) => Ok(()),
