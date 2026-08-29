@@ -190,10 +190,11 @@ impl App {
                 Row::new(vec![
                     format!("{:02}", index + 1),
                     "complete".into(),
-                    format_duration(result.raw_fork),
+                    format_duration(result.cow_fork),
+                    format_duration(result.restore),
                     format_duration(result.ready),
                     format_duration(result.workload_send),
-                    format_duration(result.program_complete),
+                    format_duration(result.result_wait),
                     format_duration(result.teardown),
                     result.output.clone(),
                 ])
@@ -202,6 +203,7 @@ impl App {
                 Row::new(vec![
                     format!("{:02}", index + 1),
                     "waiting".into(),
+                    "—".into(),
                     "—".into(),
                     "—".into(),
                     "—".into(),
@@ -221,13 +223,22 @@ impl App {
                 Constraint::Length(10),
                 Constraint::Length(10),
                 Constraint::Length(10),
+                Constraint::Length(12),
                 Constraint::Length(11),
                 Constraint::Min(24),
             ],
         )
         .header(
             Row::new([
-                "VM", "STATUS", "FORK", "READY", "SEND", "COMPLETE", "TEARDOWN", "OUTPUT",
+                "VM",
+                "STATUS",
+                "FORK",
+                "RESTORE",
+                "READY",
+                "SEND",
+                "RESULT WAIT",
+                "TEARDOWN",
+                "OUTPUT",
             ])
             .style(Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         )

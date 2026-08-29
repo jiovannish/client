@@ -45,10 +45,11 @@ impl RunRequest {
 #[derive(Clone)]
 pub struct VmResult {
     pub index: usize,
-    pub raw_fork: Duration,
+    pub cow_fork: Duration,
+    pub restore: Duration,
     pub ready: Duration,
     pub workload_send: Duration,
-    pub program_complete: Duration,
+    pub result_wait: Duration,
     pub teardown: Duration,
     pub output: String,
 }
@@ -206,10 +207,11 @@ fn parse_vm(line: &str) -> io::Result<VmResult> {
         .ok_or_else(|| invalid("Core VM result had no output field"))?;
     let mut fields = metrics.split_whitespace();
     let index = number(metric(fields.next(), "vm=")?)?;
-    let raw_fork = nanos(metric(fields.next(), "raw_fork_ns=")?)?;
+    let cow_fork = nanos(metric(fields.next(), "cow_fork_ns=")?)?;
+    let restore = nanos(metric(fields.next(), "restore_ns=")?)?;
     let ready = nanos(metric(fields.next(), "guest_ready_ns=")?)?;
     let workload_send = nanos(metric(fields.next(), "workload_send_ns=")?)?;
-    let program_complete = nanos(metric(fields.next(), "program_complete_ns=")?)?;
+    let result_wait = nanos(metric(fields.next(), "result_wait_ns=")?)?;
     let teardown = nanos(metric(fields.next(), "teardown_ns=")?)?;
     if fields.next().is_some() {
         return Err(invalid("Core VM result had unexpected metrics"));
@@ -220,10 +222,11 @@ fn parse_vm(line: &str) -> io::Result<VmResult> {
         .ok_or_else(|| invalid("Core VM output was not quoted"))?;
     Ok(VmResult {
         index,
-        raw_fork,
+        cow_fork,
+        restore,
         ready,
         workload_send,
-        program_complete,
+        result_wait,
         teardown,
         output: output.into(),
     })
@@ -316,7 +319,7 @@ mod tests {
     fn parses_a_vm_result() -> io::Result<()> {
         let mut result = None;
         parse(
-            "vm=2 raw_fork_ns=1 guest_ready_ns=2 workload_send_ns=3 program_complete_ns=4 teardown_ns=5 output=\"ok\"",
+            "vm=2 cow_fork_ns=1 restore_ns=2 guest_ready_ns=3 workload_send_ns=4 result_wait_ns=5 teardown_ns=6 output=\"ok\"",
             &mut |event| {
                 if let Event::Vm(vm) = event {
                     result = Some(vm);
