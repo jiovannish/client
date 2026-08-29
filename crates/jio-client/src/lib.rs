@@ -1,40 +1,56 @@
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use reqwest::StatusCode;
+use reqwest::blocking::{Client, Response};
+use reqwest::header::CONTENT_TYPE;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::env;
+use std::fs::File;
+use std::io::{self, Read};
+use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 pub const MAX_INSTANCES: usize = 64;
-const MAX_ERROR_BYTES: u64 = 64 * 1024;
-const REMOTE_RUNNER: &[u8] = include_bytes!("remote-run.sh");
+const MAX_WORKLOAD: u64 = 16 * 1024 * 1024;
+const MAX_RESPONSE: u64 = 8 * 1024 * 1024;
+const DEFAULT_SERVER_PORT: u16 = 8080;
 
 pub struct RunRequest {
-    host: String,
+    endpoint: String,
+    api_key: String,
     workload: PathBuf,
     instances: usize,
 }
 
 impl RunRequest {
     pub fn new(
-        host: impl Into<String>,
+        endpoint: impl Into<String>,
+        api_key: impl Into<String>,
         workload: impl Into<PathBuf>,
         instances: usize,
     ) -> io::Result<Self> {
-        let host = normalize_host(host.into())?;
+        let endpoint = normalize_endpoint(endpoint.into())?;
+        let api_key = api_key.into();
+        if api_key.is_empty() {
+            return Err(invalid("API key is empty"));
+        }
         if !(1..=MAX_INSTANCES).contains(&instances) {
             return Err(invalid(format!(
                 "instance count must be between 1 and {MAX_INSTANCES}"
             )));
         }
         Ok(Self {
-            host,
+            endpoint,
+            api_key,
             workload: workload.into(),
             instances,
         })
     }
 
     pub fn host(&self) -> &str {
-        &self.host
+        &self.endpoint
     }
 
     pub fn instances(&self) -> usize {
@@ -56,205 +72,314 @@ pub struct VmResult {
 
 pub enum Event {
     Phase(String),
-    Uploaded(Duration),
+    ArtifactReady(Duration),
     WorkloadLoaded(Duration),
     TemplateLoaded(Duration),
     Vm(VmResult),
     Done(Duration),
 }
 
+#[derive(Deserialize)]
+struct ArtifactResponse {
+    artifact_sha256: String,
+}
+
+#[derive(Serialize)]
+struct ApiRunRequest<'a> {
+    artifact_sha256: &'a str,
+    instances: usize,
+}
+
+#[derive(Deserialize)]
+struct ApiRunResponse {
+    artifact_sha256: String,
+    template_id: String,
+    core_sha256: String,
+    workload_load_ns: u64,
+    template_load_ns: u64,
+    vms: Vec<ApiVmResult>,
+}
+
+#[derive(Deserialize)]
+struct ApiVmResult {
+    index: usize,
+    cow_fork_ns: u64,
+    restore_ns: u64,
+    guest_ready_ns: u64,
+    workload_send_ns: u64,
+    result_wait_ns: u64,
+    teardown_ns: u64,
+    output: String,
+}
+
+#[derive(Deserialize)]
+struct ErrorResponse {
+    error: String,
+}
+
 pub fn run(request: &RunRequest, mut emit: impl FnMut(Event) -> io::Result<()>) -> io::Result<()> {
-    if !request.workload.is_file() {
-        return Err(invalid(format!(
-            "workload is not a file: {}",
-            request.workload.display()
-        )));
-    }
-
     let started = Instant::now();
-    let remote_workload = remote_workload_path()?;
-    emit(Event::Phase(format!("Uploading ELF to {}", request.host)))?;
-    let upload_started = Instant::now();
-    if let Err(error) = upload(&request.host, &request.workload, &remote_workload) {
-        remove_remote(&request.host, &remote_workload);
-        return Err(error);
-    }
-    if let Err(error) = emit(Event::Uploaded(upload_started.elapsed())) {
-        remove_remote(&request.host, &remote_workload);
-        return Err(error);
-    }
+    let workload = read_workload(&request.workload)?;
+    let digest = format!("{:x}", Sha256::digest(&workload));
 
-    emit(Event::Phase("Restoring existing template".into()))?;
-    let result = execute_remote(request, &remote_workload, &mut emit);
-    if result.is_err() {
-        remove_remote(&request.host, &remote_workload);
+    emit(Event::Phase(format!("Connecting to {}", request.endpoint)))?;
+    let connection = Connection::open(&request.endpoint, &request.api_key)?;
+
+    emit(Event::Phase("Preparing ELF artifact".into()))?;
+    let artifact_started = Instant::now();
+    connection.prepare_artifact(&digest, workload)?;
+    emit(Event::ArtifactReady(artifact_started.elapsed()))?;
+
+    emit(Event::Phase("Restoring template".into()))?;
+    let result = connection.run(&digest, request.instances)?;
+    validate(&result, &digest, request.instances)?;
+    emit(Event::WorkloadLoaded(Duration::from_nanos(
+        result.workload_load_ns,
+    )))?;
+    emit(Event::TemplateLoaded(Duration::from_nanos(
+        result.template_load_ns,
+    )))?;
+    for vm in result.vms {
+        emit(Event::Vm(VmResult {
+            index: vm.index,
+            cow_fork: Duration::from_nanos(vm.cow_fork_ns),
+            restore: Duration::from_nanos(vm.restore_ns),
+            ready: Duration::from_nanos(vm.guest_ready_ns),
+            workload_send: Duration::from_nanos(vm.workload_send_ns),
+            result_wait: Duration::from_nanos(vm.result_wait_ns),
+            teardown: Duration::from_nanos(vm.teardown_ns),
+            output: vm.output,
+        }))?;
     }
-    result?;
     emit(Event::Done(started.elapsed()))
 }
 
-fn execute_remote(
-    request: &RunRequest,
-    remote_workload: &str,
-    emit: &mut impl FnMut(Event) -> io::Result<()>,
-) -> io::Result<()> {
-    let mut remote = Command::new("ssh")
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("ConnectTimeout=5")
-        .arg(&request.host)
-        .arg("bash")
-        .arg("-s")
-        .arg("--")
-        .arg(remote_workload)
-        .arg(request.instances.to_string())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    let mut stdin = remote
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("ssh stdin was unavailable"))?;
-    stdin.write_all(REMOTE_RUNNER)?;
-    drop(stdin);
-
-    let stdout = remote
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("ssh stdout was unavailable"))?;
-    let mut stderr = remote
-        .stderr
-        .take()
-        .ok_or_else(|| io::Error::other("ssh stderr was unavailable"))?;
-    let error_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr
-            .by_ref()
-            .take(MAX_ERROR_BYTES)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
-    });
-
-    for line in BufReader::new(stdout).lines() {
-        parse(&line?, emit)?;
-    }
-
-    let status = remote.wait()?;
-    let stderr = match error_reader.join() {
-        Ok(result) => result?,
-        Err(_) => return Err(io::Error::other("ssh stderr reader panicked")),
-    };
-    if status.success() {
-        return Ok(());
-    }
-    Err(io::Error::other(format!(
-        "remote runner failed with {status}\n{}",
-        String::from_utf8_lossy(&stderr)
-    )))
+struct Connection {
+    base_url: String,
+    api_key: String,
+    client: Client,
+    _tunnel: Option<Tunnel>,
 }
 
-fn upload(host: &str, source: &Path, remote: &str) -> io::Result<()> {
-    let destination = format!("{host}:{remote}");
-    let output = Command::new("scp")
-        .arg("-q")
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("ConnectTimeout=5")
-        .arg(source)
-        .arg(destination)
-        .output()?;
-    require_success("scp", &output)
+impl Connection {
+    fn open(endpoint: &str, api_key: &str) -> io::Result<Self> {
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(120))
+            .build()
+            .map_err(other)?;
+        let (base_url, tunnel) = if is_url(endpoint) {
+            (endpoint.trim_end_matches('/').to_owned(), None)
+        } else {
+            let tunnel = Tunnel::open(endpoint, server_port()?)?;
+            (
+                format!("http://127.0.0.1:{}", tunnel.local_port),
+                Some(tunnel),
+            )
+        };
+        Ok(Self {
+            base_url,
+            api_key: api_key.into(),
+            client,
+            _tunnel: tunnel,
+        })
+    }
+
+    fn prepare_artifact(&self, digest: &str, workload: Vec<u8>) -> io::Result<()> {
+        let cached = self
+            .client
+            .head(format!("{}/v0/artifacts/{digest}", self.base_url))
+            .bearer_auth(&self.api_key)
+            .send()
+            .map_err(other)?;
+        if cached.status().is_success() {
+            return Ok(());
+        }
+        if cached.status() != StatusCode::NOT_FOUND {
+            return Err(response_error(cached)?);
+        }
+        let response = self
+            .client
+            .put(format!("{}/v0/artifacts/{digest}", self.base_url))
+            .bearer_auth(&self.api_key)
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .body(workload)
+            .send()
+            .map_err(other)?;
+        let stored: ArtifactResponse = decode(response)?;
+        if stored.artifact_sha256 != digest {
+            return Err(invalid("server acknowledged a different artifact digest"));
+        }
+        Ok(())
+    }
+
+    fn run(&self, digest: &str, instances: usize) -> io::Result<ApiRunResponse> {
+        let body = serde_json::to_vec(&ApiRunRequest {
+            artifact_sha256: digest,
+            instances,
+        })
+        .map_err(other)?;
+        let response = self
+            .client
+            .post(format!("{}/v0/runs", self.base_url))
+            .bearer_auth(&self.api_key)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .map_err(other)?;
+        decode(response)
+    }
 }
 
-fn remove_remote(host: &str, remote: &str) {
-    let _ = Command::new("ssh")
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("ConnectTimeout=5")
-        .arg(host)
-        .arg("rm")
-        .arg("-f")
-        .arg("--")
-        .arg(remote)
-        .status();
+struct Tunnel {
+    child: Child,
+    local_port: u16,
 }
 
-fn parse(line: &str, emit: &mut impl FnMut(Event) -> io::Result<()>) -> io::Result<()> {
-    if let Some(value) = line.strip_prefix("workload_load_ns=") {
-        let value = value
-            .split_whitespace()
-            .next()
-            .ok_or_else(|| invalid("Core workload timing was empty"))?;
-        return emit(Event::WorkloadLoaded(nanos(value)?));
+impl Tunnel {
+    fn open(host: &str, remote_port: u16) -> io::Result<Self> {
+        let socket = TcpListener::bind(("127.0.0.1", 0))?;
+        let local_port = socket.local_addr()?.port();
+        drop(socket);
+        let forward = format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}");
+        let mut child = Command::new("ssh")
+            .arg("-N")
+            .arg("-T")
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("ConnectTimeout=5")
+            .arg("-o")
+            .arg("ExitOnForwardFailure=yes")
+            .arg("-L")
+            .arg(forward)
+            .arg(host)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], local_port));
+        for _ in 0..250 {
+            if let Some(status) = child.try_wait()? {
+                return Err(io::Error::other(format!(
+                    "SSH tunnel exited before it was ready: {status}"
+                )));
+            }
+            if TcpStream::connect_timeout(&address, Duration::from_millis(20)).is_ok() {
+                return Ok(Self { child, local_port });
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "SSH tunnel did not become ready",
+        ))
     }
-    if let Some(value) = line.strip_prefix("template_load_ns=") {
-        return emit(Event::TemplateLoaded(nanos(value)?));
+}
+
+impl Drop for Tunnel {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
-    if line.starts_with("vm=") {
-        return emit(Event::Vm(parse_vm(line)?));
+}
+
+fn validate(response: &ApiRunResponse, digest: &str, instances: usize) -> io::Result<()> {
+    if response.artifact_sha256 != digest
+        || !is_sha256(&response.template_id)
+        || !is_sha256(&response.core_sha256)
+        || response.vms.len() != instances
+    {
+        return Err(invalid("server returned inconsistent run provenance"));
+    }
+    let mut seen = vec![false; instances];
+    for vm in &response.vms {
+        let index = vm
+            .index
+            .checked_sub(1)
+            .filter(|index| *index < instances)
+            .ok_or_else(|| invalid("server returned an invalid VM index"))?;
+        if std::mem::replace(&mut seen[index], true) {
+            return Err(invalid("server returned a duplicate VM index"));
+        }
     }
     Ok(())
 }
 
-fn parse_vm(line: &str) -> io::Result<VmResult> {
-    let (metrics, output) = line
-        .split_once(" output=")
-        .ok_or_else(|| invalid("Core VM result had no output field"))?;
-    let mut fields = metrics.split_whitespace();
-    let index = number(metric(fields.next(), "vm=")?)?;
-    let cow_fork = nanos(metric(fields.next(), "cow_fork_ns=")?)?;
-    let restore = nanos(metric(fields.next(), "restore_ns=")?)?;
-    let ready = nanos(metric(fields.next(), "guest_ready_ns=")?)?;
-    let workload_send = nanos(metric(fields.next(), "workload_send_ns=")?)?;
-    let result_wait = nanos(metric(fields.next(), "result_wait_ns=")?)?;
-    let teardown = nanos(metric(fields.next(), "teardown_ns=")?)?;
-    if fields.next().is_some() {
-        return Err(invalid("Core VM result had unexpected metrics"));
+fn decode<T: for<'de> Deserialize<'de>>(mut response: Response) -> io::Result<T> {
+    let status = response.status();
+    let mut bytes = Vec::new();
+    response
+        .by_ref()
+        .take(MAX_RESPONSE + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_RESPONSE {
+        return Err(invalid("server response exceeded its bound"));
     }
-    let output = output
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .ok_or_else(|| invalid("Core VM output was not quoted"))?;
-    Ok(VmResult {
-        index,
-        cow_fork,
-        restore,
-        ready,
-        workload_send,
-        result_wait,
-        teardown,
-        output: output.into(),
-    })
+    if !status.is_success() {
+        let message = serde_json::from_slice::<ErrorResponse>(&bytes)
+            .map(|response| response.error)
+            .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).into_owned());
+        return Err(io::Error::other(format!(
+            "server returned {status}: {message}"
+        )));
+    }
+    serde_json::from_slice(&bytes).map_err(invalid)
 }
 
-fn metric<'a>(field: Option<&'a str>, prefix: &str) -> io::Result<&'a str> {
-    field
-        .and_then(|value| value.strip_prefix(prefix))
-        .ok_or_else(|| invalid(format!("Core VM result lacked {prefix}")))
+fn response_error(mut response: Response) -> io::Result<io::Error> {
+    let status = response.status();
+    let mut bytes = Vec::new();
+    response
+        .by_ref()
+        .take(MAX_RESPONSE + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_RESPONSE {
+        return Ok(invalid("server response exceeded its bound"));
+    }
+    let message = serde_json::from_slice::<ErrorResponse>(&bytes)
+        .map(|response| response.error)
+        .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).into_owned());
+    Ok(io::Error::other(format!(
+        "server returned {status}: {message}"
+    )))
 }
 
-fn nanos(value: &str) -> io::Result<Duration> {
-    value.parse().map(Duration::from_nanos).map_err(invalid)
+fn read_workload(path: &PathBuf) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(MAX_WORKLOAD + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_WORKLOAD {
+        return Err(invalid(format!(
+            "workload size is outside the supported range: {}",
+            path.display()
+        )));
+    }
+    Ok(bytes)
 }
 
-fn number(value: &str) -> io::Result<usize> {
-    value.parse().map_err(invalid)
-}
-
-fn remote_workload_path() -> io::Result<String> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(io::Error::other)?
-        .as_nanos();
-    Ok(format!(
-        "/tmp/jio-client-{}-{timestamp}.elf",
-        std::process::id()
-    ))
+fn normalize_endpoint(endpoint: String) -> io::Result<String> {
+    if is_url(&endpoint) {
+        let parsed = reqwest::Url::parse(&endpoint).map_err(invalid)?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(invalid("server URL contains unsupported components"));
+        }
+        if parsed.scheme() == "http"
+            && !matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "::1"))
+        {
+            return Err(invalid("plain HTTP is only allowed for a loopback URL"));
+        }
+        return Ok(endpoint.trim_end_matches('/').into());
+    }
+    normalize_host(endpoint)
 }
 
 fn normalize_host(host: String) -> io::Result<String> {
@@ -271,6 +396,8 @@ fn normalize_host(host: String) -> io::Result<String> {
         .ok_or_else(|| invalid("host is invalid"))?;
     if user.is_empty()
         || address.is_empty()
+        || user.starts_with('-')
+        || address.starts_with('-')
         || !host
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b".@:_-[]".contains(&byte))
@@ -280,56 +407,86 @@ fn normalize_host(host: String) -> io::Result<String> {
     Ok(host)
 }
 
-fn require_success(name: &str, output: &Output) -> io::Result<()> {
-    if output.status.success() {
-        return Ok(());
+fn server_port() -> io::Result<u16> {
+    match env::var("JIO_SERVER_PORT") {
+        Ok(value) => value.parse().map_err(invalid),
+        Err(env::VarError::NotPresent) => Ok(DEFAULT_SERVER_PORT),
+        Err(error) => Err(invalid(error)),
     }
-    Err(io::Error::other(format!(
-        "{name} failed with {}\n{}{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )))
+}
+
+fn is_url(endpoint: &str) -> bool {
+    endpoint.starts_with("http://") || endpoint.starts_with("https://")
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn invalid(message: impl ToString) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
 }
 
+fn other(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
+    io::Error::other(error)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Event, RunRequest, parse};
+    use super::{ApiRunResponse, ApiVmResult, RunRequest, normalize_endpoint, validate};
     use std::io;
-    use std::path::PathBuf;
 
     #[test]
     fn normalizes_a_bare_host() -> io::Result<()> {
-        let request = RunRequest::new("192.168.1.81", PathBuf::from("program"), 5)?;
+        let request = RunRequest::new("192.168.1.81", "key", "program", 5)?;
         assert_eq!(request.host(), "ubuntu@192.168.1.81");
         assert_eq!(request.instances(), 5);
         Ok(())
     }
 
     #[test]
-    fn rejects_shell_characters_in_a_host() {
-        assert!(RunRequest::new("host;reboot", "program", 1).is_err());
+    fn accepts_an_https_endpoint() -> io::Result<()> {
+        assert_eq!(
+            normalize_endpoint("https://api.jio.dev/".into())?,
+            "https://api.jio.dev"
+        );
+        Ok(())
     }
 
     #[test]
-    fn parses_a_vm_result() -> io::Result<()> {
-        let mut result = None;
-        parse(
-            "vm=2 cow_fork_ns=1 restore_ns=2 guest_ready_ns=3 workload_send_ns=4 result_wait_ns=5 teardown_ns=6 output=\"ok\"",
-            &mut |event| {
-                if let Event::Vm(vm) = event {
-                    result = Some(vm);
-                }
-                Ok(())
-            },
-        )?;
-        let vm = result.ok_or_else(|| io::Error::other("missing VM result"))?;
-        assert_eq!(vm.index, 2);
-        assert_eq!(vm.output, "ok");
-        Ok(())
+    fn rejects_remote_plain_http() {
+        assert!(normalize_endpoint("http://api.jio.dev".into()).is_err());
+    }
+
+    #[test]
+    fn rejects_shell_characters_in_a_host() {
+        assert!(RunRequest::new("host;reboot", "key", "program", 1).is_err());
+        assert!(RunRequest::new("-oProxyCommand=x@host", "key", "program", 1).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_results() {
+        let vm = || ApiVmResult {
+            index: 1,
+            cow_fork_ns: 1,
+            restore_ns: 1,
+            guest_ready_ns: 1,
+            workload_send_ns: 1,
+            result_wait_ns: 1,
+            teardown_ns: 1,
+            output: String::new(),
+        };
+        let response = ApiRunResponse {
+            artifact_sha256: "a".repeat(64),
+            template_id: "b".repeat(64),
+            core_sha256: "c".repeat(64),
+            workload_load_ns: 1,
+            template_load_ns: 1,
+            vms: vec![vm(), vm()],
+        };
+        assert!(validate(&response, &"a".repeat(64), 2).is_err());
     }
 }

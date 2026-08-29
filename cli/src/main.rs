@@ -50,7 +50,7 @@ fn options() -> io::Result<(PathBuf, String, usize)> {
     let host = host.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "missing --host <user@address> (or JIO_HOST)",
+            "missing --host <user@address|https://url> (or JIO_HOST)",
         )
     })?;
     if !(1..=jio_client::MAX_INSTANCES).contains(&instances) {
@@ -68,6 +68,6 @@ fn options() -> io::Result<(PathBuf, String, usize)> {
 fn usage() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "expected: jio run <main.rs> --instances <count> --host <user@address>",
+        "expected: jio run <main.rs> --instances <count> --host <user@address|https://url>",
     )
 }

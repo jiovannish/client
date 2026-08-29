@@ -44,7 +44,9 @@ fn execute(
     temporary: &Path,
 ) -> io::Result<()> {
     let program = temporary.join("program");
-    let request = RunRequest::new(host, &program, instances)?;
+    let api_key = env::var("JIO_API_KEY")
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "JIO_API_KEY is required"))?;
+    let request = RunRequest::new(host, api_key, &program, instances)?;
     send(
         sender,
         Event::Phase("Cross-compiling Rust for Linux".into()),

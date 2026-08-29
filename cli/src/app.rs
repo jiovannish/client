@@ -24,7 +24,7 @@ struct App {
     host: String,
     phase: String,
     compiled: Option<Duration>,
-    uploaded: Option<Duration>,
+    artifact_ready: Option<Duration>,
     workload_loaded: Option<Duration>,
     template_loaded: Option<Duration>,
     total: Option<Duration>,
@@ -39,7 +39,7 @@ impl App {
             host,
             phase: "Starting".into(),
             compiled: None,
-            uploaded: None,
+            artifact_ready: None,
             workload_loaded: None,
             template_loaded: None,
             total: None,
@@ -98,7 +98,7 @@ impl App {
     fn apply_client(&mut self, event: ClientEvent) {
         match event {
             ClientEvent::Phase(phase) => self.phase = phase,
-            ClientEvent::Uploaded(duration) => self.uploaded = Some(duration),
+            ClientEvent::ArtifactReady(duration) => self.artifact_ready = Some(duration),
             ClientEvent::WorkloadLoaded(duration) => self.workload_loaded = Some(duration),
             ClientEvent::TemplateLoaded(duration) => self.template_loaded = Some(duration),
             ClientEvent::Vm(result) if (1..=self.vms.len()).contains(&result.index) => {
@@ -163,7 +163,7 @@ impl App {
         .spacing(1)
         .split(area);
         draw_metric(frame, areas[0], "COMPILE", self.compiled);
-        draw_metric(frame, areas[1], "UPLOAD", self.uploaded);
+        draw_metric(frame, areas[1], "ARTIFACT", self.artifact_ready);
         draw_metric(frame, areas[2], "WORKLOAD LOAD", self.workload_loaded);
         draw_metric(frame, areas[3], "TEMPLATE LOAD", self.template_loaded);
     }
