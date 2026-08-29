@@ -12,9 +12,12 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
 pub fn run(source: PathBuf, host: String, instances: usize) -> io::Result<()> {
+    let interpreted = source
+        .extension()
+        .is_some_and(|extension| extension == "py");
     let events = runner::start(source, host.clone(), instances);
     let mut terminal = ratatui::try_init()?;
-    let result = App::new(host, instances).run(&mut terminal, events);
+    let result = App::new(host, instances, interpreted).run(&mut terminal, events);
     let restore = ratatui::try_restore();
     result?;
     restore
@@ -24,6 +27,7 @@ struct App {
     host: String,
     phase: String,
     compiled: Option<Duration>,
+    interpreted: bool,
     artifact_ready: Option<Duration>,
     workload_loaded: Option<Duration>,
     template_loaded: Option<Duration>,
@@ -34,11 +38,12 @@ struct App {
 }
 
 impl App {
-    fn new(host: String, instances: usize) -> Self {
+    fn new(host: String, instances: usize, interpreted: bool) -> Self {
         Self {
             host,
             phase: "Starting".into(),
             compiled: None,
+            interpreted,
             artifact_ready: None,
             workload_loaded: None,
             template_loaded: None,
@@ -162,7 +167,11 @@ impl App {
         ])
         .spacing(1)
         .split(area);
-        draw_metric(frame, areas[0], "COMPILE", self.compiled);
+        if self.interpreted {
+            draw_metric_value(frame, areas[0], "INTERPRETED", "IN VM");
+        } else {
+            draw_metric(frame, areas[0], "COMPILE", self.compiled);
+        }
         draw_metric(frame, areas[1], "ARTIFACT", self.artifact_ready);
         draw_metric(frame, areas[2], "WORKLOAD LOAD", self.workload_loaded);
         draw_metric(frame, areas[3], "TEMPLATE LOAD", self.template_loaded);
@@ -283,6 +292,10 @@ impl App {
 
 fn draw_metric(frame: &mut Frame, area: Rect, title: &str, duration: Option<Duration>) {
     let value = duration.map(format_duration).unwrap_or_else(|| "—".into());
+    draw_metric_value(frame, area, title, &value);
+}
+
+fn draw_metric_value(frame: &mut Frame, area: Rect, title: &str, value: &str) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             value,

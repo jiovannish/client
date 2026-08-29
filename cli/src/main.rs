@@ -68,6 +68,6 @@ fn options() -> io::Result<(PathBuf, String, usize)> {
 fn usage() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "expected: jio run <main.rs> --instances <count> --host <user@address|https://url>",
+        "expected: jio run <main.rs|main.py> --instances <count> --host <user@address|https://url>",
     )
 }

@@ -20,6 +20,7 @@ const DEFAULT_SERVER_PORT: u16 = 8080;
 pub struct RunRequest {
     endpoint: String,
     api_key: String,
+    runtime: String,
     workload: PathBuf,
     instances: usize,
 }
@@ -28,6 +29,7 @@ impl RunRequest {
     pub fn new(
         endpoint: impl Into<String>,
         api_key: impl Into<String>,
+        runtime: impl Into<String>,
         workload: impl Into<PathBuf>,
         instances: usize,
     ) -> io::Result<Self> {
@@ -35,6 +37,10 @@ impl RunRequest {
         let api_key = api_key.into();
         if api_key.is_empty() {
             return Err(invalid("API key is empty"));
+        }
+        let runtime = runtime.into();
+        if !is_runtime(&runtime) {
+            return Err(invalid("runtime identifier is invalid"));
         }
         if !(1..=MAX_INSTANCES).contains(&instances) {
             return Err(invalid(format!(
@@ -44,6 +50,7 @@ impl RunRequest {
         Ok(Self {
             endpoint,
             api_key,
+            runtime,
             workload: workload.into(),
             instances,
         })
@@ -87,12 +94,14 @@ struct ArtifactResponse {
 #[derive(Serialize)]
 struct ApiRunRequest<'a> {
     artifact_sha256: &'a str,
+    runtime: &'a str,
     instances: usize,
 }
 
 #[derive(Deserialize)]
 struct ApiRunResponse {
     artifact_sha256: String,
+    runtime: String,
     template_id: String,
     core_sha256: String,
     workload_load_ns: u64,
@@ -125,14 +134,14 @@ pub fn run(request: &RunRequest, mut emit: impl FnMut(Event) -> io::Result<()>) 
     emit(Event::Phase(format!("Connecting to {}", request.endpoint)))?;
     let connection = Connection::open(&request.endpoint, &request.api_key)?;
 
-    emit(Event::Phase("Preparing ELF artifact".into()))?;
+    emit(Event::Phase("Preparing workload artifact".into()))?;
     let artifact_started = Instant::now();
     connection.prepare_artifact(&digest, workload)?;
     emit(Event::ArtifactReady(artifact_started.elapsed()))?;
 
     emit(Event::Phase("Restoring template".into()))?;
-    let result = connection.run(&digest, request.instances)?;
-    validate(&result, &digest, request.instances)?;
+    let result = connection.run(&digest, &request.runtime, request.instances)?;
+    validate(&result, &digest, &request.runtime, request.instances)?;
     emit(Event::WorkloadLoaded(Duration::from_nanos(
         result.workload_load_ns,
     )))?;
@@ -213,9 +222,10 @@ impl Connection {
         Ok(())
     }
 
-    fn run(&self, digest: &str, instances: usize) -> io::Result<ApiRunResponse> {
+    fn run(&self, digest: &str, runtime: &str, instances: usize) -> io::Result<ApiRunResponse> {
         let body = serde_json::to_vec(&ApiRunRequest {
             artifact_sha256: digest,
+            runtime,
             instances,
         })
         .map_err(other)?;
@@ -286,8 +296,14 @@ impl Drop for Tunnel {
     }
 }
 
-fn validate(response: &ApiRunResponse, digest: &str, instances: usize) -> io::Result<()> {
+fn validate(
+    response: &ApiRunResponse,
+    digest: &str,
+    runtime: &str,
+    instances: usize,
+) -> io::Result<()> {
     if response.artifact_sha256 != digest
+        || response.runtime != runtime
         || !is_sha256(&response.template_id)
         || !is_sha256(&response.core_sha256)
         || response.vms.len() != instances
@@ -426,6 +442,18 @@ fn is_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn is_runtime(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+}
+
 fn invalid(message: impl ToString) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
 }
@@ -441,9 +469,10 @@ mod tests {
 
     #[test]
     fn normalizes_a_bare_host() -> io::Result<()> {
-        let request = RunRequest::new("192.168.1.81", "key", "program", 5)?;
+        let request = RunRequest::new("192.168.1.81", "key", "native-elf-v0", "program", 5)?;
         assert_eq!(request.host(), "ubuntu@192.168.1.81");
         assert_eq!(request.instances(), 5);
+        assert_eq!(request.runtime, "native-elf-v0");
         Ok(())
     }
 
@@ -463,8 +492,22 @@ mod tests {
 
     #[test]
     fn rejects_shell_characters_in_a_host() {
-        assert!(RunRequest::new("host;reboot", "key", "program", 1).is_err());
-        assert!(RunRequest::new("-oProxyCommand=x@host", "key", "program", 1).is_err());
+        assert!(RunRequest::new("host;reboot", "key", "native-elf-v0", "program", 1).is_err());
+        assert!(
+            RunRequest::new(
+                "-oProxyCommand=x@host",
+                "key",
+                "native-elf-v0",
+                "program",
+                1,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_an_invalid_runtime() {
+        assert!(RunRequest::new("host", "key", "../python", "program", 1).is_err());
     }
 
     #[test]
@@ -481,12 +524,13 @@ mod tests {
         };
         let response = ApiRunResponse {
             artifact_sha256: "a".repeat(64),
+            runtime: "native-elf-v0".into(),
             template_id: "b".repeat(64),
             core_sha256: "c".repeat(64),
             workload_load_ns: 1,
             template_load_ns: 1,
             vms: vec![vm(), vm()],
         };
-        assert!(validate(&response, &"a".repeat(64), 2).is_err());
+        assert!(validate(&response, &"a".repeat(64), "native-elf-v0", 2).is_err());
     }
 }

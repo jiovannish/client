@@ -46,32 +46,47 @@ fn execute(
     let program = temporary.join("program");
     let api_key = env::var("JIO_API_KEY")
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "JIO_API_KEY is required"))?;
-    let request = RunRequest::new(host, api_key, &program, instances)?;
-    send(
-        sender,
-        Event::Phase("Cross-compiling Rust for Linux".into()),
-    )?;
-    let compile_started = Instant::now();
-    let compile = Command::new("rustup")
-        .arg("run")
-        .arg("1.85.1")
-        .arg("rustc")
-        .arg("--edition=2024")
-        .arg("--target=x86_64-unknown-linux-musl")
-        .arg("-C")
-        .arg("linker=rust-lld")
-        .arg("-C")
-        .arg("opt-level=3")
-        .arg("-C")
-        .arg("panic=abort")
-        .arg("-C")
-        .arg("strip=symbols")
-        .arg(source)
-        .arg("-o")
-        .arg(&program)
-        .output()?;
-    require_success("rustc", &compile)?;
-    send(sender, Event::Compiled(compile_started.elapsed()))?;
+    let (workload, runtime) = match source.extension().and_then(|value| value.to_str()) {
+        Some("rs") => {
+            send(
+                sender,
+                Event::Phase("Cross-compiling Rust for Linux".into()),
+            )?;
+            let compile_started = Instant::now();
+            let compile = Command::new("rustup")
+                .arg("run")
+                .arg("1.85.1")
+                .arg("rustc")
+                .arg("--edition=2024")
+                .arg("--target=x86_64-unknown-linux-musl")
+                .arg("-C")
+                .arg("linker=rust-lld")
+                .arg("-C")
+                .arg("opt-level=3")
+                .arg("-C")
+                .arg("panic=abort")
+                .arg("-C")
+                .arg("strip=symbols")
+                .arg(source)
+                .arg("-o")
+                .arg(&program)
+                .output()?;
+            require_success("rustc", &compile)?;
+            send(sender, Event::Compiled(compile_started.elapsed()))?;
+            (program.as_path(), "native-elf-v0")
+        }
+        Some("py") => {
+            send(sender, Event::Phase("Preparing Python source".into()))?;
+            (source, "python3.12-source-v0")
+        }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "source must end in .rs or .py",
+            ));
+        }
+    };
+    let request = RunRequest::new(host, api_key, runtime, workload, instances)?;
 
     let execution = jio_client::run(&request, |event| match event {
         ClientEvent::Phase(phase) => send(sender, Event::Phase(phase)),
