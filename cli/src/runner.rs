@@ -30,20 +30,31 @@ impl Source {
     }
 }
 
-pub fn start(source: Source, host: String, instances: usize) -> Receiver<Event> {
+pub fn start(
+    source: Source,
+    host: String,
+    instances: usize,
+    concurrency: usize,
+) -> Receiver<Event> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        if let Err(error) = run(&source, &host, instances, &sender) {
+        if let Err(error) = run(&source, &host, instances, concurrency, &sender) {
             let _ = sender.send(Event::Error(error.to_string()));
         }
     });
     receiver
 }
 
-fn run(source: &Source, host: &str, instances: usize, sender: &Sender<Event>) -> io::Result<()> {
+fn run(
+    source: &Source,
+    host: &str,
+    instances: usize,
+    concurrency: usize,
+    sender: &Sender<Event>,
+) -> io::Result<()> {
     let started = Instant::now();
     let temporary = temporary_directory()?;
-    let result = execute(source, host, instances, sender, &temporary);
+    let result = execute(source, host, instances, concurrency, sender, &temporary);
     let cleanup = fs::remove_dir_all(&temporary);
     result?;
     cleanup?;
@@ -54,6 +65,7 @@ fn execute(
     source: &Source,
     host: &str,
     instances: usize,
+    concurrency: usize,
     sender: &Sender<Event>,
     temporary: &Path,
 ) -> io::Result<()> {
@@ -106,7 +118,7 @@ fn execute(
             ));
         }
     };
-    let request = RunRequest::new(host, api_key, runtime, workload, instances)?;
+    let request = RunRequest::new(host, api_key, runtime, workload, instances, concurrency)?;
 
     let execution = jio_client::run(&request, |event| match event {
         ClientEvent::Phase(phase) => send(sender, Event::Phase(phase)),

@@ -10,11 +10,16 @@ use std::io;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
-pub fn run(source: runner::Source, host: String, instances: usize) -> io::Result<()> {
+pub fn run(
+    source: runner::Source,
+    host: String,
+    instances: usize,
+    concurrency: usize,
+) -> io::Result<()> {
     let interpreted = source.is_interpreted();
-    let events = runner::start(source, host.clone(), instances);
+    let events = runner::start(source, host.clone(), instances, concurrency);
     let mut terminal = ratatui::try_init()?;
-    let result = App::new(host, instances, interpreted).run(&mut terminal, events);
+    let result = App::new(host, instances, concurrency, interpreted).run(&mut terminal, events);
     let restore = ratatui::try_restore();
     result?;
     restore
@@ -29,13 +34,14 @@ struct App {
     workload_loaded: Option<Duration>,
     template_loaded: Option<Duration>,
     total: Option<Duration>,
+    concurrency: usize,
     vms: Vec<Option<VmResult>>,
     error: Option<String>,
     finished: bool,
 }
 
 impl App {
-    fn new(host: String, instances: usize, interpreted: bool) -> Self {
+    fn new(host: String, instances: usize, concurrency: usize, interpreted: bool) -> Self {
         Self {
             host,
             phase: "Starting".into(),
@@ -45,6 +51,7 @@ impl App {
             workload_loaded: None,
             template_loaded: None,
             total: None,
+            concurrency,
             vms: vec![None; instances],
             error: None,
             finished: false,
@@ -196,6 +203,7 @@ impl App {
                 Row::new(vec![
                     format!("{:02}", index + 1),
                     "complete".into(),
+                    format_duration(result.queue_wait),
                     format_duration(result.cow_fork),
                     format_duration(result.restore),
                     format_duration(result.ready),
@@ -216,6 +224,7 @@ impl App {
                     "—".into(),
                     "—".into(),
                     "—".into(),
+                    "—".into(),
                 ])
                 .style(Style::new().fg(Color::DarkGray))
             }
@@ -224,6 +233,7 @@ impl App {
             rows,
             [
                 Constraint::Length(4),
+                Constraint::Length(10),
                 Constraint::Length(10),
                 Constraint::Length(10),
                 Constraint::Length(10),
@@ -238,6 +248,7 @@ impl App {
             Row::new([
                 "VM",
                 "STATUS",
+                "QUEUE",
                 "FORK",
                 "RESTORE",
                 "READY",
@@ -253,7 +264,11 @@ impl App {
             Block::bordered()
                 .border_type(BorderType::Rounded)
                 .border_style(Style::new().dark_gray())
-                .title(format!(" {} MICROVM ", self.vms.len())),
+                .title(format!(
+                    " {} MICROVM · {} CONCURRENT ",
+                    self.vms.len(),
+                    self.concurrency
+                )),
         );
         frame.render_widget(table, area);
     }

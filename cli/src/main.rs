@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    match options().and_then(|(source, host, instances)| app::run(source, host, instances)) {
+    match options().and_then(|(source, host, instances, concurrency)| {
+        app::run(source, host, instances, concurrency)
+    }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("jio: {error}");
@@ -16,7 +18,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn options() -> io::Result<(runner::Source, String, usize)> {
+fn options() -> io::Result<(runner::Source, String, usize, usize)> {
     let mut arguments = env::args_os().skip(1);
     if arguments.next().as_deref() != Some(std::ffi::OsStr::new("run")) {
         return Err(usage());
@@ -24,6 +26,7 @@ fn options() -> io::Result<(runner::Source, String, usize)> {
     let source = arguments.next().ok_or_else(usage)?;
     let mut host = env::var("JIO_HOST").ok();
     let mut instances = 1;
+    let mut concurrency = None;
     let mut language = None;
 
     while let Some(argument) = arguments.next() {
@@ -43,6 +46,16 @@ fn options() -> io::Result<(runner::Source, String, usize)> {
                 .map_err(|_| usage())?
                 .parse()
                 .map_err(|_| usage())?;
+        } else if argument == "--concurrency" {
+            concurrency = Some(
+                arguments
+                    .next()
+                    .ok_or_else(usage)?
+                    .into_string()
+                    .map_err(|_| usage())?
+                    .parse()
+                    .map_err(|_| usage())?,
+            );
         } else if argument == "--language" {
             language = Some(
                 arguments
@@ -71,6 +84,13 @@ fn options() -> io::Result<(runner::Source, String, usize)> {
             ),
         ));
     }
+    let concurrency = concurrency.unwrap_or(instances);
+    if !(1..=instances).contains(&concurrency) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "concurrency must be between 1 and the instance count",
+        ));
+    }
     let source = match language.as_deref() {
         None => runner::Source::File(PathBuf::from(source)),
         Some("python") => runner::Source::Python(source.into_string().map_err(|_| {
@@ -83,12 +103,12 @@ fn options() -> io::Result<(runner::Source, String, usize)> {
             ));
         }
     };
-    Ok((source, host, instances))
+    Ok((source, host, instances, concurrency))
 }
 
 fn usage() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "expected: jio run <main.rs|main.py> ... or jio run <code> --language python ...",
+        "expected: jio run <main.rs|main.py> [--instances <count>] [--concurrency <count>] [--host <host>] or jio run <code> --language python [options]",
     )
 }

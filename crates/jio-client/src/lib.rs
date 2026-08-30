@@ -23,6 +23,7 @@ pub struct RunRequest {
     runtime: String,
     workload: PathBuf,
     instances: usize,
+    concurrency: usize,
 }
 
 impl RunRequest {
@@ -32,6 +33,7 @@ impl RunRequest {
         runtime: impl Into<String>,
         workload: impl Into<PathBuf>,
         instances: usize,
+        concurrency: usize,
     ) -> io::Result<Self> {
         let endpoint = normalize_endpoint(endpoint.into())?;
         let api_key = api_key.into();
@@ -47,12 +49,18 @@ impl RunRequest {
                 "instance count must be between 1 and {MAX_INSTANCES}"
             )));
         }
+        if !(1..=instances).contains(&concurrency) {
+            return Err(invalid(
+                "concurrency must be between 1 and the instance count",
+            ));
+        }
         Ok(Self {
             endpoint,
             api_key,
             runtime,
             workload: workload.into(),
             instances,
+            concurrency,
         })
     }
 
@@ -63,11 +71,16 @@ impl RunRequest {
     pub fn instances(&self) -> usize {
         self.instances
     }
+
+    pub fn concurrency(&self) -> usize {
+        self.concurrency
+    }
 }
 
 #[derive(Clone)]
 pub struct VmResult {
     pub index: usize,
+    pub queue_wait: Duration,
     pub cow_fork: Duration,
     pub restore: Duration,
     pub ready: Duration,
@@ -96,12 +109,14 @@ struct ApiRunRequest<'a> {
     artifact_sha256: &'a str,
     runtime: &'a str,
     instances: usize,
+    concurrency: usize,
 }
 
 #[derive(Deserialize)]
 struct ApiRunResponse {
     artifact_sha256: String,
     runtime: String,
+    concurrency: usize,
     template_id: String,
     core_sha256: String,
     workload_load_ns: u64,
@@ -112,6 +127,7 @@ struct ApiRunResponse {
 #[derive(Deserialize)]
 struct ApiVmResult {
     index: usize,
+    queue_wait_ns: u64,
     cow_fork_ns: u64,
     restore_ns: u64,
     guest_ready_ns: u64,
@@ -140,8 +156,19 @@ pub fn run(request: &RunRequest, mut emit: impl FnMut(Event) -> io::Result<()>) 
     emit(Event::ArtifactReady(artifact_started.elapsed()))?;
 
     emit(Event::Phase("Restoring template".into()))?;
-    let result = connection.run(&digest, &request.runtime, request.instances)?;
-    validate(&result, &digest, &request.runtime, request.instances)?;
+    let result = connection.run(
+        &digest,
+        &request.runtime,
+        request.instances,
+        request.concurrency,
+    )?;
+    validate(
+        &result,
+        &digest,
+        &request.runtime,
+        request.instances,
+        request.concurrency,
+    )?;
     emit(Event::WorkloadLoaded(Duration::from_nanos(
         result.workload_load_ns,
     )))?;
@@ -151,6 +178,7 @@ pub fn run(request: &RunRequest, mut emit: impl FnMut(Event) -> io::Result<()>) 
     for vm in result.vms {
         emit(Event::Vm(VmResult {
             index: vm.index,
+            queue_wait: Duration::from_nanos(vm.queue_wait_ns),
             cow_fork: Duration::from_nanos(vm.cow_fork_ns),
             restore: Duration::from_nanos(vm.restore_ns),
             ready: Duration::from_nanos(vm.guest_ready_ns),
@@ -222,11 +250,18 @@ impl Connection {
         Ok(())
     }
 
-    fn run(&self, digest: &str, runtime: &str, instances: usize) -> io::Result<ApiRunResponse> {
+    fn run(
+        &self,
+        digest: &str,
+        runtime: &str,
+        instances: usize,
+        concurrency: usize,
+    ) -> io::Result<ApiRunResponse> {
         let body = serde_json::to_vec(&ApiRunRequest {
             artifact_sha256: digest,
             runtime,
             instances,
+            concurrency,
         })
         .map_err(other)?;
         let response = self
@@ -301,9 +336,11 @@ fn validate(
     digest: &str,
     runtime: &str,
     instances: usize,
+    concurrency: usize,
 ) -> io::Result<()> {
     if response.artifact_sha256 != digest
         || response.runtime != runtime
+        || response.concurrency != concurrency
         || !is_sha256(&response.template_id)
         || !is_sha256(&response.core_sha256)
         || response.vms.len() != instances
@@ -469,9 +506,10 @@ mod tests {
 
     #[test]
     fn normalizes_a_bare_host() -> io::Result<()> {
-        let request = RunRequest::new("192.168.1.81", "key", "native-elf-v0", "program", 5)?;
+        let request = RunRequest::new("192.168.1.81", "key", "native-elf-v0", "program", 5, 3)?;
         assert_eq!(request.host(), "ubuntu@192.168.1.81");
         assert_eq!(request.instances(), 5);
+        assert_eq!(request.concurrency(), 3);
         assert_eq!(request.runtime, "native-elf-v0");
         Ok(())
     }
@@ -492,13 +530,14 @@ mod tests {
 
     #[test]
     fn rejects_shell_characters_in_a_host() {
-        assert!(RunRequest::new("host;reboot", "key", "native-elf-v0", "program", 1).is_err());
+        assert!(RunRequest::new("host;reboot", "key", "native-elf-v0", "program", 1, 1).is_err());
         assert!(
             RunRequest::new(
                 "-oProxyCommand=x@host",
                 "key",
                 "native-elf-v0",
                 "program",
+                1,
                 1,
             )
             .is_err()
@@ -507,13 +546,19 @@ mod tests {
 
     #[test]
     fn rejects_an_invalid_runtime() {
-        assert!(RunRequest::new("host", "key", "../python", "program", 1).is_err());
+        assert!(RunRequest::new("host", "key", "../python", "program", 1, 1).is_err());
+    }
+
+    #[test]
+    fn rejects_concurrency_above_the_instance_count() {
+        assert!(RunRequest::new("host", "key", "native-elf-v0", "program", 5, 6).is_err());
     }
 
     #[test]
     fn rejects_duplicate_results() {
         let vm = || ApiVmResult {
             index: 1,
+            queue_wait_ns: 1,
             cow_fork_ns: 1,
             restore_ns: 1,
             guest_ready_ns: 1,
@@ -525,12 +570,13 @@ mod tests {
         let response = ApiRunResponse {
             artifact_sha256: "a".repeat(64),
             runtime: "native-elf-v0".into(),
+            concurrency: 1,
             template_id: "b".repeat(64),
             core_sha256: "c".repeat(64),
             workload_load_ns: 1,
             template_load_ns: 1,
             vms: vec![vm(), vm()],
         };
-        assert!(validate(&response, &"a".repeat(64), "native-elf-v0", 2).is_err());
+        assert!(validate(&response, &"a".repeat(64), "native-elf-v0", 2, 1).is_err());
     }
 }
