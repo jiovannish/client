@@ -1,15 +1,36 @@
 mod app;
 mod runner;
+mod session;
 
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+enum Invocation {
+    Run {
+        source: runner::Source,
+        host: String,
+        instances: usize,
+        concurrency: usize,
+    },
+    Create {
+        host: String,
+        runtime: &'static str,
+    },
+    Connect {
+        host: String,
+        id: String,
+    },
+    Destroy {
+        host: String,
+        id: String,
+    },
+}
+
 fn main() -> ExitCode {
-    match options().and_then(|(source, host, instances, concurrency)| {
-        app::run(source, host, instances, concurrency)
-    }) {
+    match options().and_then(execute) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("jio: {error}");
@@ -18,11 +39,36 @@ fn main() -> ExitCode {
     }
 }
 
-fn options() -> io::Result<(runner::Source, String, usize, usize)> {
-    let mut arguments = env::args_os().skip(1);
-    if arguments.next().as_deref() != Some(std::ffi::OsStr::new("run")) {
-        return Err(usage());
+fn execute(invocation: Invocation) -> io::Result<()> {
+    match invocation {
+        Invocation::Run {
+            source,
+            host,
+            instances,
+            concurrency,
+        } => app::run(source, host, instances, concurrency),
+        Invocation::Create { host, runtime } => {
+            let created = session::create(host, runtime)?;
+            println!("{}", created.session_id);
+            Ok(())
+        }
+        Invocation::Connect { host, id } => session::connect(host, &id),
+        Invocation::Destroy { host, id } => session::destroy(host, &id),
     }
+}
+
+fn options() -> io::Result<Invocation> {
+    let mut arguments = env::args_os().skip(1);
+    match arguments.next().as_deref() {
+        Some(command) if command == OsStr::new("run") => run_options(arguments),
+        Some(command) if command == OsStr::new("create") => create_options(arguments),
+        Some(command) if command == OsStr::new("connect") => session_options(arguments, false),
+        Some(command) if command == OsStr::new("destroy") => session_options(arguments, true),
+        _ => Err(usage()),
+    }
+}
+
+fn run_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invocation> {
     let source = arguments.next().ok_or_else(usage)?;
     let mut host = env::var("JIO_HOST").ok();
     let mut instances = 1;
@@ -31,39 +77,19 @@ fn options() -> io::Result<(runner::Source, String, usize, usize)> {
 
     while let Some(argument) = arguments.next() {
         if argument == "--host" {
-            host = Some(
-                arguments
-                    .next()
-                    .ok_or_else(usage)?
-                    .into_string()
-                    .map_err(|_| usage())?,
-            );
+            host = Some(text(arguments.next(), "host")?);
         } else if argument == "--instances" {
-            instances = arguments
-                .next()
-                .ok_or_else(usage)?
-                .into_string()
-                .map_err(|_| usage())?
+            instances = text(arguments.next(), "instance count")?
                 .parse()
                 .map_err(|_| usage())?;
         } else if argument == "--concurrency" {
             concurrency = Some(
-                arguments
-                    .next()
-                    .ok_or_else(usage)?
-                    .into_string()
-                    .map_err(|_| usage())?
+                text(arguments.next(), "concurrency")?
                     .parse()
                     .map_err(|_| usage())?,
             );
         } else if argument == "--language" {
-            language = Some(
-                arguments
-                    .next()
-                    .ok_or_else(usage)?
-                    .into_string()
-                    .map_err(|_| usage())?,
-            );
+            language = Some(text(arguments.next(), "language")?);
         } else {
             return Err(usage());
         }
@@ -103,12 +129,76 @@ fn options() -> io::Result<(runner::Source, String, usize, usize)> {
             ));
         }
     };
-    Ok((source, host, instances, concurrency))
+    Ok(Invocation::Run {
+        source,
+        host,
+        instances,
+        concurrency,
+    })
+}
+
+fn create_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invocation> {
+    let mut host = None;
+    let mut language = "python".to_owned();
+    let mut language_set = false;
+    while let Some(argument) = arguments.next() {
+        if argument == "--host" {
+            if host.is_some() {
+                return Err(usage());
+            }
+            host = Some(arguments.next().ok_or_else(usage)?);
+        } else if argument == "--language" {
+            if language_set {
+                return Err(usage());
+            }
+            language = text(arguments.next(), "language")?;
+            language_set = true;
+        } else {
+            return Err(usage());
+        }
+    }
+    Ok(Invocation::Create {
+        host: session::host(host)?,
+        runtime: session::runtime(&language)?,
+    })
+}
+
+fn session_options(
+    mut arguments: impl Iterator<Item = OsString>,
+    destroy: bool,
+) -> io::Result<Invocation> {
+    let id = text(arguments.next(), "session ID")?;
+    if !jio_client::valid_session_id(&id) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "session ID is invalid",
+        ));
+    }
+    let mut host = None;
+    while let Some(argument) = arguments.next() {
+        if argument != "--host" || host.is_some() {
+            return Err(usage());
+        }
+        host = Some(arguments.next().ok_or_else(usage)?);
+    }
+    let host = session::host(host)?;
+    if destroy {
+        Ok(Invocation::Destroy { host, id })
+    } else {
+        Ok(Invocation::Connect { host, id })
+    }
+}
+
+fn text(value: Option<OsString>, name: &str) -> io::Result<String> {
+    value
+        .ok_or_else(usage)?
+        .into_string()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, format!("{name} is not UTF-8")))
 }
 
 fn usage() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "expected: jio run <main.rs|main.py> [--instances <count>] [--concurrency <count>] [--host <host>] or jio run <code> --language python [options]",
+        "expected: jio run <source> [options] | jio create [--language python] [--host <host>] | jio connect <session-id> [--host <host>] | jio destroy <session-id> [--host <host>]",
     )
 }
