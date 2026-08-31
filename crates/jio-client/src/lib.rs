@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::File;
 use std::io::{self, Read};
+use std::net::Ipv4Addr;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -13,9 +14,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub const MAX_INSTANCES: usize = 64;
+pub const MAX_SSH_PUBLIC_KEY_BYTES: usize = 512;
 const MAX_WORKLOAD: u64 = 16 * 1024 * 1024;
 const MAX_RESPONSE: u64 = 8 * 1024 * 1024;
 const DEFAULT_SERVER_PORT: u16 = 8080;
+const SSH_ED25519_PREFIX: &[u8] = b"ssh-ed25519 ";
+const SSH_ED25519_BASE64_BYTES: usize = 68;
+const SSH_ED25519_BLOB_BYTES: usize = 51;
 
 pub struct RunRequest {
     endpoint: String,
@@ -151,6 +156,197 @@ struct ApiVmResult {
 #[derive(Deserialize)]
 struct ErrorResponse {
     error: String,
+}
+
+pub struct SessionClient {
+    endpoint: String,
+    api_key: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionState {
+    Ready,
+    Failed,
+    Destroyed,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Session {
+    pub session_id: String,
+    pub state: SessionState,
+    pub runtime: String,
+    pub template_id: String,
+    pub core_sha256: String,
+    pub guest_ipv4: Ipv4Addr,
+    pub ssh_port: u16,
+    pub ssh_username: String,
+    pub ssh_host_public_key: String,
+    pub guest_ready_ns: u64,
+    pub network_ready_ns: u64,
+    pub ssh_ready_ns: u64,
+}
+
+#[derive(Serialize)]
+struct ApiCreateSessionRequest<'a> {
+    runtime: &'a str,
+    client_public_key: &'a str,
+}
+
+impl SessionClient {
+    pub fn new(endpoint: impl Into<String>, api_key: impl Into<String>) -> io::Result<Self> {
+        let endpoint = normalize_endpoint(endpoint.into())?;
+        let api_key = api_key.into();
+        if api_key.is_empty() {
+            return Err(invalid("API key is empty"));
+        }
+        Ok(Self { endpoint, api_key })
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub fn uses_http_endpoint(&self) -> bool {
+        is_url(&self.endpoint)
+    }
+
+    pub fn create(&self, runtime: &str, client_public_key: &str) -> io::Result<Session> {
+        if !is_runtime(runtime) {
+            return Err(invalid("runtime identifier is invalid"));
+        }
+        if !valid_ssh_public_key(client_public_key) {
+            return Err(invalid(
+                "client public key is not one strict ssh-ed25519 key",
+            ));
+        }
+        let connection = Connection::open(&self.endpoint, &self.api_key)?;
+        let body = serde_json::to_vec(&ApiCreateSessionRequest {
+            runtime,
+            client_public_key,
+        })
+        .map_err(other)?;
+        let response = connection
+            .client
+            .post(format!("{}/v0/sessions", connection.base_url))
+            .bearer_auth(&connection.api_key)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .map_err(other)?;
+        let session: Session = decode(response)?;
+        validate_session(&session)?;
+        if session.runtime != runtime || session.state != SessionState::Ready {
+            return Err(invalid("server returned an inconsistent created session"));
+        }
+        Ok(session)
+    }
+
+    pub fn get(&self, id: &str) -> io::Result<Session> {
+        if !valid_session_id(id) {
+            return Err(invalid("session ID is invalid"));
+        }
+        let connection = Connection::open(&self.endpoint, &self.api_key)?;
+        let response = connection
+            .client
+            .get(format!("{}/v0/sessions/{id}", connection.base_url))
+            .bearer_auth(&connection.api_key)
+            .send()
+            .map_err(other)?;
+        let session: Session = decode(response)?;
+        validate_session(&session)?;
+        if session.session_id != id {
+            return Err(invalid("server returned a different session ID"));
+        }
+        Ok(session)
+    }
+
+    pub fn destroy(&self, id: &str) -> io::Result<()> {
+        if !valid_session_id(id) {
+            return Err(invalid("session ID is invalid"));
+        }
+        let connection = Connection::open(&self.endpoint, &self.api_key)?;
+        let response = connection
+            .client
+            .delete(format!("{}/v0/sessions/{id}", connection.base_url))
+            .bearer_auth(&connection.api_key)
+            .send()
+            .map_err(other)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(response_error(response)?)
+        }
+    }
+}
+
+fn validate_session(session: &Session) -> io::Result<()> {
+    if !valid_session_id(&session.session_id)
+        || !is_runtime(&session.runtime)
+        || !is_sha256(&session.template_id)
+        || !is_sha256(&session.core_sha256)
+        || !session.guest_ipv4.is_private()
+        || session.ssh_port != 22
+        || session.ssh_username != "jio"
+        || !valid_ssh_public_key(&session.ssh_host_public_key)
+        || session.guest_ready_ns == 0
+        || session.network_ready_ns < session.guest_ready_ns
+        || session.ssh_ready_ns < session.network_ready_ns
+    {
+        return Err(invalid("server returned inconsistent session metadata"));
+    }
+    Ok(())
+}
+
+pub fn valid_session_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+pub fn valid_ssh_public_key(value: &str) -> bool {
+    if value.len() != SSH_ED25519_PREFIX.len() + SSH_ED25519_BASE64_BYTES
+        || value.len() > MAX_SSH_PUBLIC_KEY_BYTES
+        || !value.as_bytes().starts_with(SSH_ED25519_PREFIX)
+    {
+        return false;
+    }
+    let Some(decoded) = decode_ed25519_base64(&value.as_bytes()[SSH_ED25519_PREFIX.len()..]) else {
+        return false;
+    };
+    decoded[..4] == 11_u32.to_be_bytes()
+        && decoded[4..15] == *b"ssh-ed25519"
+        && decoded[15..19] == 32_u32.to_be_bytes()
+}
+
+fn decode_ed25519_base64(encoded: &[u8]) -> Option<[u8; SSH_ED25519_BLOB_BYTES]> {
+    if encoded.len() != SSH_ED25519_BASE64_BYTES {
+        return None;
+    }
+    let mut decoded = [0_u8; SSH_ED25519_BLOB_BYTES];
+    for (source, target) in encoded.chunks_exact(4).zip(decoded.chunks_exact_mut(3)) {
+        let first = base64_value(source[0])?;
+        let second = base64_value(source[1])?;
+        let third = base64_value(source[2])?;
+        let fourth = base64_value(source[3])?;
+        target[0] = (first << 2) | (second >> 4);
+        target[1] = (second << 4) | (third >> 2);
+        target[2] = (third << 6) | fourth;
+    }
+    Some(decoded)
+}
+
+fn base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
 }
 
 pub fn run(request: &RunRequest, mut emit: impl FnMut(Event) -> io::Result<()>) -> io::Result<()> {
@@ -518,7 +714,9 @@ fn other(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiRunResponse, ApiVmResult, RunRequest, normalize_endpoint, validate};
+    use super::{
+        ApiRunResponse, ApiVmResult, RunRequest, normalize_endpoint, valid_ssh_public_key, validate,
+    };
     use std::io;
 
     #[test]
@@ -626,5 +824,17 @@ mod tests {
             }],
         };
         assert!(validate(&response, &"a".repeat(64), "native-elf-v0", 1, 1).is_err());
+    }
+
+    #[test]
+    fn accepts_only_a_canonical_ed25519_public_key() {
+        let key =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
+        assert!(valid_ssh_public_key(key));
+        assert!(!valid_ssh_public_key(&format!("restrict {key}")));
+        assert!(!valid_ssh_public_key(&format!("{key} comment")));
+        let mut malformed = key.as_bytes().to_vec();
+        malformed[20] = b'!';
+        assert!(!valid_ssh_public_key(&String::from_utf8_lossy(&malformed)));
     }
 }
