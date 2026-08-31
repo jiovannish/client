@@ -1,6 +1,6 @@
 use crate::runner::{self, Event as RunnerEvent};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use jio_client::{Event as ClientEvent, VmResult};
+use jio_client::{Event as ClientEvent, TemplateAdmission, VmResult};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -32,7 +32,7 @@ struct App {
     interpreted: bool,
     artifact_ready: Option<Duration>,
     workload_loaded: Option<Duration>,
-    template_loaded: Option<Duration>,
+    template_admission: Option<TemplateAdmission>,
     total: Option<Duration>,
     concurrency: usize,
     vms: Vec<Option<VmResult>>,
@@ -49,7 +49,7 @@ impl App {
             interpreted,
             artifact_ready: None,
             workload_loaded: None,
-            template_loaded: None,
+            template_admission: None,
             total: None,
             concurrency,
             vms: vec![None; instances],
@@ -109,7 +109,9 @@ impl App {
             ClientEvent::Phase(phase) => self.phase = phase,
             ClientEvent::ArtifactReady(duration) => self.artifact_ready = Some(duration),
             ClientEvent::WorkloadLoaded(duration) => self.workload_loaded = Some(duration),
-            ClientEvent::TemplateLoaded(duration) => self.template_loaded = Some(duration),
+            ClientEvent::TemplateAdmitted(admission) => {
+                self.template_admission = Some(admission);
+            }
             ClientEvent::Vm(result) if (1..=self.vms.len()).contains(&result.index) => {
                 let index = result.index - 1;
                 self.vms[index] = Some(result);
@@ -178,7 +180,7 @@ impl App {
         }
         draw_metric(frame, areas[1], "ARTIFACT", self.artifact_ready);
         draw_metric(frame, areas[2], "WORKLOAD LOAD", self.workload_loaded);
-        draw_metric(frame, areas[3], "TEMPLATE LOAD", self.template_loaded);
+        draw_template_admission(frame, areas[3], self.template_admission);
     }
 
     fn draw_vms(&self, frame: &mut Frame, area: Rect) {
@@ -322,6 +324,47 @@ fn draw_metric_value(frame: &mut Frame, area: Rect, title: &str, value: &str) {
         ),
         area,
     );
+}
+
+fn draw_template_admission(frame: &mut Frame, area: Rect, value: Option<TemplateAdmission>) {
+    let lines = match value {
+        Some(value) => vec![
+            Line::from(Span::styled(
+                format!(
+                    "load {} · {}",
+                    format_duration(value.load),
+                    format_bytes(value.verified_bytes)
+                ),
+                Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(format!("verify {}", format_duration(value.verify))),
+            Line::from(format!("prewarm {}", format_duration(value.prewarm))),
+        ],
+        None => vec![Line::from("—")],
+    };
+    frame.render_widget(
+        Paragraph::new(lines).centered().block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::new().dark_gray())
+                .title(Span::styled(
+                    "TEMPLATE ADMISSION",
+                    Style::new().fg(Color::DarkGray),
+                )),
+        ),
+        area,
+    );
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / MIB)
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn format_duration(duration: Duration) -> String {

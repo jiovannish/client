@@ -90,11 +90,19 @@ pub struct VmResult {
     pub output: String,
 }
 
+#[derive(Clone, Copy)]
+pub struct TemplateAdmission {
+    pub load: Duration,
+    pub verify: Duration,
+    pub prewarm: Duration,
+    pub verified_bytes: u64,
+}
+
 pub enum Event {
     Phase(String),
     ArtifactReady(Duration),
     WorkloadLoaded(Duration),
-    TemplateLoaded(Duration),
+    TemplateAdmitted(TemplateAdmission),
     Vm(VmResult),
     Done(Duration),
 }
@@ -121,6 +129,9 @@ struct ApiRunResponse {
     core_sha256: String,
     workload_load_ns: u64,
     template_load_ns: u64,
+    template_verify_ns: u64,
+    template_prewarm_ns: u64,
+    template_verified_bytes: u64,
     vms: Vec<ApiVmResult>,
 }
 
@@ -155,7 +166,7 @@ pub fn run(request: &RunRequest, mut emit: impl FnMut(Event) -> io::Result<()>) 
     connection.prepare_artifact(&digest, workload)?;
     emit(Event::ArtifactReady(artifact_started.elapsed()))?;
 
-    emit(Event::Phase("Restoring template".into()))?;
+    emit(Event::Phase("Admitting and restoring template".into()))?;
     let result = connection.run(
         &digest,
         &request.runtime,
@@ -172,9 +183,12 @@ pub fn run(request: &RunRequest, mut emit: impl FnMut(Event) -> io::Result<()>) 
     emit(Event::WorkloadLoaded(Duration::from_nanos(
         result.workload_load_ns,
     )))?;
-    emit(Event::TemplateLoaded(Duration::from_nanos(
-        result.template_load_ns,
-    )))?;
+    emit(Event::TemplateAdmitted(TemplateAdmission {
+        load: Duration::from_nanos(result.template_load_ns),
+        verify: Duration::from_nanos(result.template_verify_ns),
+        prewarm: Duration::from_nanos(result.template_prewarm_ns),
+        verified_bytes: result.template_verified_bytes,
+    }))?;
     for vm in result.vms {
         emit(Event::Vm(VmResult {
             index: vm.index,
@@ -343,6 +357,9 @@ fn validate(
         || response.concurrency != concurrency
         || !is_sha256(&response.template_id)
         || !is_sha256(&response.core_sha256)
+        || response.template_prewarm_ns > response.template_verify_ns
+        || response.template_verify_ns > response.template_load_ns
+        || response.template_verified_bytes == 0
         || response.vms.len() != instances
     {
         return Err(invalid("server returned inconsistent run provenance"));
@@ -574,9 +591,40 @@ mod tests {
             template_id: "b".repeat(64),
             core_sha256: "c".repeat(64),
             workload_load_ns: 1,
-            template_load_ns: 1,
+            template_load_ns: 3,
+            template_verify_ns: 2,
+            template_prewarm_ns: 1,
+            template_verified_bytes: 134_217_900,
             vms: vec![vm(), vm()],
         };
         assert!(validate(&response, &"a".repeat(64), "native-elf-v0", 2, 1).is_err());
+    }
+
+    #[test]
+    fn rejects_inconsistent_template_admission_metrics() {
+        let response = ApiRunResponse {
+            artifact_sha256: "a".repeat(64),
+            runtime: "native-elf-v0".into(),
+            concurrency: 1,
+            template_id: "b".repeat(64),
+            core_sha256: "c".repeat(64),
+            workload_load_ns: 1,
+            template_load_ns: 1,
+            template_verify_ns: 2,
+            template_prewarm_ns: 3,
+            template_verified_bytes: 0,
+            vms: vec![ApiVmResult {
+                index: 1,
+                queue_wait_ns: 1,
+                cow_fork_ns: 1,
+                restore_ns: 1,
+                guest_ready_ns: 1,
+                workload_send_ns: 1,
+                result_wait_ns: 1,
+                teardown_ns: 1,
+                output: String::new(),
+            }],
+        };
+        assert!(validate(&response, &"a".repeat(64), "native-elf-v0", 1, 1).is_err());
     }
 }
