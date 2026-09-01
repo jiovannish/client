@@ -1,0 +1,25 @@
+[build-system]
+requires = ["maturin==1.15.0"]
+build-backend = "maturin"
+
+[project]
+name = "jio-sdk"
+version = "0.1.0"
+description = "Python SDK for programmable Jio microVM sessions"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Jio" }]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Rust",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+]
+
+[tool.maturin]
+module-name = "jio._native"
+python-source = "python"
+bindings = "pyo3"
+strip = true

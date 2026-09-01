@@ -1,5 +1,5 @@
 [workspace]
-members = ["cli", "crates/jio-client"]
+members = ["bindings/node", "bindings/python", "cli", "crates/jio-client"]
 resolver = "3"
 
 [workspace.package]

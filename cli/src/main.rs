@@ -58,11 +58,16 @@ fn execute(invocation: Invocation) -> io::Result<()> {
 }
 
 fn options() -> io::Result<Invocation> {
-    let mut arguments = env::args_os().skip(1);
+    options_from(env::args_os().skip(1))
+}
+
+fn options_from(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invocation> {
     match arguments.next().as_deref() {
         Some(command) if command == OsStr::new("run") => run_options(arguments),
         Some(command) if command == OsStr::new("create") => create_options(arguments),
-        Some(command) if command == OsStr::new("connect") => session_options(arguments, false),
+        Some(command) if command == OsStr::new("connect") || command == OsStr::new("attach") => {
+            session_options(arguments, false)
+        }
         Some(command) if command == OsStr::new("destroy") => session_options(arguments, true),
         _ => Err(usage()),
     }
@@ -199,6 +204,31 @@ fn text(value: Option<OsString>, name: &str) -> io::Result<String> {
 fn usage() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "expected: jio run <source> [options] | jio create [--language python] [--host <host>] | jio connect <session-id> [--host <host>] | jio destroy <session-id> [--host <host>]",
+        "expected: jio run <source> [options] | jio create [--language python] [--host <host>] | jio connect|attach <session-id> [--host <host>] | jio destroy <session-id> [--host <host>]",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Invocation, options_from};
+    use std::ffi::OsString;
+
+    fn arguments(command: &str) -> impl Iterator<Item = OsString> {
+        [
+            command,
+            "abababababababababababababababab",
+            "--host",
+            "ubuntu@host",
+        ]
+        .into_iter()
+        .map(OsString::from)
+    }
+
+    #[test]
+    fn connect_and_attach_address_the_same_existing_session() {
+        for command in ["connect", "attach"] {
+            let invocation = options_from(arguments(command));
+            assert!(matches!(invocation, Ok(Invocation::Connect { .. })));
+        }
+    }
 }

@@ -13,11 +13,24 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+mod vm;
+
+#[cfg(unix)]
+pub use vm::{
+    CommandResult, DEFAULT_COMMAND_TIMEOUT, DEFAULT_RUNTIME, MAX_COMMAND_TIMEOUT, MAX_FILE_BYTES,
+    Vm, VmClient,
+};
+
 pub const MAX_INSTANCES: usize = 64;
 pub const MAX_SSH_PUBLIC_KEY_BYTES: usize = 512;
+const MIN_API_KEY_BYTES: usize = 32;
+const MAX_API_KEY_BYTES: usize = 256;
 const MAX_WORKLOAD: u64 = 16 * 1024 * 1024;
 const MAX_RESPONSE: u64 = 8 * 1024 * 1024;
-const DEFAULT_SERVER_PORT: u16 = 8080;
+const DEFAULT_ENDPOINT_PORT: u16 = 8080;
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const CREATE_SESSION_TIMEOUT: Duration = Duration::from_secs(310);
 const SSH_ED25519_PREFIX: &[u8] = b"ssh-ed25519 ";
 const SSH_ED25519_BASE64_BYTES: usize = 68;
 const SSH_ED25519_BLOB_BYTES: usize = 51;
@@ -42,8 +55,8 @@ impl RunRequest {
     ) -> io::Result<Self> {
         let endpoint = normalize_endpoint(endpoint.into())?;
         let api_key = api_key.into();
-        if api_key.is_empty() {
-            return Err(invalid("API key is empty"));
+        if !valid_api_key(&api_key) {
+            return Err(invalid("API key must contain 32..=256 visible ASCII bytes"));
         }
         let runtime = runtime.into();
         if !is_runtime(&runtime) {
@@ -158,6 +171,7 @@ struct ErrorResponse {
     error: String,
 }
 
+#[derive(Clone)]
 pub struct SessionClient {
     endpoint: String,
     api_key: String,
@@ -198,8 +212,8 @@ impl SessionClient {
     pub fn new(endpoint: impl Into<String>, api_key: impl Into<String>) -> io::Result<Self> {
         let endpoint = normalize_endpoint(endpoint.into())?;
         let api_key = api_key.into();
-        if api_key.is_empty() {
-            return Err(invalid("API key is empty"));
+        if !valid_api_key(&api_key) {
+            return Err(invalid("API key must contain 32..=256 visible ASCII bytes"));
         }
         Ok(Self { endpoint, api_key })
     }
@@ -212,6 +226,13 @@ impl SessionClient {
         is_url(&self.endpoint)
     }
 
+    pub fn uses_local_http_endpoint(&self) -> bool {
+        reqwest::Url::parse(&self.endpoint).is_ok_and(|url| {
+            url.scheme() == "http"
+                && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1"))
+        })
+    }
+
     pub fn create(&self, runtime: &str, client_public_key: &str) -> io::Result<Session> {
         if !is_runtime(runtime) {
             return Err(invalid("runtime identifier is invalid"));
@@ -221,7 +242,7 @@ impl SessionClient {
                 "client public key is not one strict ssh-ed25519 key",
             ));
         }
-        let connection = Connection::open(&self.endpoint, &self.api_key)?;
+        let connection = Connection::open(&self.endpoint, &self.api_key, CREATE_SESSION_TIMEOUT)?;
         let body = serde_json::to_vec(&ApiCreateSessionRequest {
             runtime,
             client_public_key,
@@ -238,7 +259,7 @@ impl SessionClient {
         let session: Session = decode(response)?;
         validate_session(&session)?;
         if session.runtime != runtime || session.state != SessionState::Ready {
-            return Err(invalid("server returned an inconsistent created session"));
+            return Err(invalid("endpoint returned an inconsistent created session"));
         }
         Ok(session)
     }
@@ -247,7 +268,7 @@ impl SessionClient {
         if !valid_session_id(id) {
             return Err(invalid("session ID is invalid"));
         }
-        let connection = Connection::open(&self.endpoint, &self.api_key)?;
+        let connection = Connection::open(&self.endpoint, &self.api_key, DEFAULT_REQUEST_TIMEOUT)?;
         let response = connection
             .client
             .get(format!("{}/v0/sessions/{id}", connection.base_url))
@@ -257,7 +278,7 @@ impl SessionClient {
         let session: Session = decode(response)?;
         validate_session(&session)?;
         if session.session_id != id {
-            return Err(invalid("server returned a different session ID"));
+            return Err(invalid("endpoint returned a different session ID"));
         }
         Ok(session)
     }
@@ -266,14 +287,14 @@ impl SessionClient {
         if !valid_session_id(id) {
             return Err(invalid("session ID is invalid"));
         }
-        let connection = Connection::open(&self.endpoint, &self.api_key)?;
+        let connection = Connection::open(&self.endpoint, &self.api_key, DEFAULT_REQUEST_TIMEOUT)?;
         let response = connection
             .client
             .delete(format!("{}/v0/sessions/{id}", connection.base_url))
             .bearer_auth(&connection.api_key)
             .send()
             .map_err(other)?;
-        if response.status().is_success() {
+        if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
             Ok(())
         } else {
             Err(response_error(response)?)
@@ -294,7 +315,7 @@ fn validate_session(session: &Session) -> io::Result<()> {
         || session.network_ready_ns < session.guest_ready_ns
         || session.ssh_ready_ns < session.network_ready_ns
     {
-        return Err(invalid("server returned inconsistent session metadata"));
+        return Err(invalid("endpoint returned inconsistent session metadata"));
     }
     Ok(())
 }
@@ -355,7 +376,8 @@ pub fn run(request: &RunRequest, mut emit: impl FnMut(Event) -> io::Result<()>) 
     let digest = format!("{:x}", Sha256::digest(&workload));
 
     emit(Event::Phase(format!("Connecting to {}", request.endpoint)))?;
-    let connection = Connection::open(&request.endpoint, &request.api_key)?;
+    let connection =
+        Connection::open(&request.endpoint, &request.api_key, DEFAULT_REQUEST_TIMEOUT)?;
 
     emit(Event::Phase("Preparing workload artifact".into()))?;
     let artifact_started = Instant::now();
@@ -409,16 +431,16 @@ struct Connection {
 }
 
 impl Connection {
-    fn open(endpoint: &str, api_key: &str) -> io::Result<Self> {
+    fn open(endpoint: &str, api_key: &str, timeout: Duration) -> io::Result<Self> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(120))
+            .timeout(timeout)
             .build()
             .map_err(other)?;
         let (base_url, tunnel) = if is_url(endpoint) {
             (endpoint.trim_end_matches('/').to_owned(), None)
         } else {
-            let tunnel = Tunnel::open(endpoint, server_port()?)?;
+            let tunnel = Tunnel::open(endpoint, endpoint_port()?)?;
             (
                 format!("http://127.0.0.1:{}", tunnel.local_port),
                 Some(tunnel),
@@ -455,7 +477,7 @@ impl Connection {
             .map_err(other)?;
         let stored: ArtifactResponse = decode(response)?;
         if stored.artifact_sha256 != digest {
-            return Err(invalid("server acknowledged a different artifact digest"));
+            return Err(invalid("endpoint acknowledged a different artifact digest"));
         }
         Ok(())
     }
@@ -558,7 +580,7 @@ fn validate(
         || response.template_verified_bytes == 0
         || response.vms.len() != instances
     {
-        return Err(invalid("server returned inconsistent run provenance"));
+        return Err(invalid("endpoint returned inconsistent run provenance"));
     }
     let mut seen = vec![false; instances];
     for vm in &response.vms {
@@ -566,9 +588,9 @@ fn validate(
             .index
             .checked_sub(1)
             .filter(|index| *index < instances)
-            .ok_or_else(|| invalid("server returned an invalid VM index"))?;
+            .ok_or_else(|| invalid("endpoint returned an invalid VM index"))?;
         if std::mem::replace(&mut seen[index], true) {
-            return Err(invalid("server returned a duplicate VM index"));
+            return Err(invalid("endpoint returned a duplicate VM index"));
         }
     }
     Ok(())
@@ -582,14 +604,14 @@ fn decode<T: for<'de> Deserialize<'de>>(mut response: Response) -> io::Result<T>
         .take(MAX_RESPONSE + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_RESPONSE {
-        return Err(invalid("server response exceeded its bound"));
+        return Err(invalid("endpoint response exceeded its bound"));
     }
     if !status.is_success() {
         let message = serde_json::from_slice::<ErrorResponse>(&bytes)
             .map(|response| response.error)
             .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).into_owned());
         return Err(io::Error::other(format!(
-            "server returned {status}: {message}"
+            "endpoint returned {status}: {message}"
         )));
     }
     serde_json::from_slice(&bytes).map_err(invalid)
@@ -603,13 +625,13 @@ fn response_error(mut response: Response) -> io::Result<io::Error> {
         .take(MAX_RESPONSE + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_RESPONSE {
-        return Ok(invalid("server response exceeded its bound"));
+        return Ok(invalid("endpoint response exceeded its bound"));
     }
     let message = serde_json::from_slice::<ErrorResponse>(&bytes)
         .map(|response| response.error)
         .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).into_owned());
     Ok(io::Error::other(format!(
-        "server returned {status}: {message}"
+        "endpoint returned {status}: {message}"
     )))
 }
 
@@ -636,7 +658,7 @@ fn normalize_endpoint(endpoint: String) -> io::Result<String> {
             || parsed.query().is_some()
             || parsed.fragment().is_some()
         {
-            return Err(invalid("server URL contains unsupported components"));
+            return Err(invalid("endpoint URL contains unsupported components"));
         }
         if parsed.scheme() == "http"
             && !matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "::1"))
@@ -673,10 +695,16 @@ fn normalize_host(host: String) -> io::Result<String> {
     Ok(host)
 }
 
-fn server_port() -> io::Result<u16> {
-    match env::var("JIO_SERVER_PORT") {
+fn endpoint_port() -> io::Result<u16> {
+    match env::var("JIO_ENDPOINT_PORT") {
         Ok(value) => value.parse().map_err(invalid),
-        Err(env::VarError::NotPresent) => Ok(DEFAULT_SERVER_PORT),
+        // Preserve the experimental hosted-Server variable while callers move
+        // to endpoint-neutral standalone Core or hosted service configuration.
+        Err(env::VarError::NotPresent) => match env::var("JIO_SERVER_PORT") {
+            Ok(value) => value.parse().map_err(invalid),
+            Err(env::VarError::NotPresent) => Ok(DEFAULT_ENDPOINT_PORT),
+            Err(error) => Err(invalid(error)),
+        },
         Err(error) => Err(invalid(error)),
     }
 }
@@ -704,6 +732,11 @@ fn is_runtime(value: &str) -> bool {
         })
 }
 
+fn valid_api_key(value: &str) -> bool {
+    (MIN_API_KEY_BYTES..=MAX_API_KEY_BYTES).contains(&value.len())
+        && value.as_bytes().iter().all(u8::is_ascii_graphic)
+}
+
 fn invalid(message: impl ToString) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
 }
@@ -715,14 +748,17 @@ fn other(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiRunResponse, ApiVmResult, RunRequest, normalize_endpoint, valid_ssh_public_key, validate,
+        ApiRunResponse, ApiVmResult, RunRequest, SessionClient, normalize_endpoint,
+        valid_ssh_public_key, validate,
     };
     use std::io;
 
+    const API_KEY: &str = "0123456789abcdef0123456789abcdef";
+
     #[test]
     fn normalizes_a_bare_host() -> io::Result<()> {
-        let request = RunRequest::new("192.168.1.81", "key", "native-elf-v0", "program", 5, 3)?;
-        assert_eq!(request.host(), "ubuntu@192.168.1.81");
+        let request = RunRequest::new("192.168.1.82", API_KEY, "native-elf-v0", "program", 5, 3)?;
+        assert_eq!(request.host(), "ubuntu@192.168.1.82");
         assert_eq!(request.instances(), 5);
         assert_eq!(request.concurrency(), 3);
         assert_eq!(request.runtime, "native-elf-v0");
@@ -739,17 +775,24 @@ mod tests {
     }
 
     #[test]
+    fn identifies_only_loopback_plain_http_as_local_guest_access() -> io::Result<()> {
+        assert!(SessionClient::new("http://127.0.0.1:8080", API_KEY)?.uses_local_http_endpoint());
+        assert!(!SessionClient::new("https://api.jio.dev", API_KEY)?.uses_local_http_endpoint());
+        Ok(())
+    }
+
+    #[test]
     fn rejects_remote_plain_http() {
         assert!(normalize_endpoint("http://api.jio.dev".into()).is_err());
     }
 
     #[test]
     fn rejects_shell_characters_in_a_host() {
-        assert!(RunRequest::new("host;reboot", "key", "native-elf-v0", "program", 1, 1).is_err());
+        assert!(RunRequest::new("host;reboot", API_KEY, "native-elf-v0", "program", 1, 1).is_err());
         assert!(
             RunRequest::new(
                 "-oProxyCommand=x@host",
-                "key",
+                API_KEY,
                 "native-elf-v0",
                 "program",
                 1,
@@ -761,12 +804,12 @@ mod tests {
 
     #[test]
     fn rejects_an_invalid_runtime() {
-        assert!(RunRequest::new("host", "key", "../python", "program", 1, 1).is_err());
+        assert!(RunRequest::new("host", API_KEY, "../python", "program", 1, 1).is_err());
     }
 
     #[test]
     fn rejects_concurrency_above_the_instance_count() {
-        assert!(RunRequest::new("host", "key", "native-elf-v0", "program", 5, 6).is_err());
+        assert!(RunRequest::new("host", API_KEY, "native-elf-v0", "program", 5, 6).is_err());
     }
 
     #[test]

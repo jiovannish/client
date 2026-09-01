@@ -1,0 +1,27 @@
+[package]
+name = "jio-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+jio-client = { path = "../../crates/jio-client" }
+napi = { version = "=3.4.0", default-features = false, features = ["napi6"] }
+napi-derive = "=3.3.0"
+
+[build-dependencies]
+napi-build = "=2.2.4"
+
+# napi-rs emits the unsafe N-API registration glue inside its macros. The
+# handwritten binding remains safe Rust; the shared client still forbids unsafe.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+expect_used = "deny"
+panic = "deny"
+unwrap_used = "deny"

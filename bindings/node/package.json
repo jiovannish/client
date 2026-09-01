@@ -1,0 +1,34 @@
+{
+  "name": "@jio/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node.js and TypeScript SDK for programmable Jio microVM sessions",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "*.node",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "node --test test/*.test.js"
+  },
+  "napi": {
+    "binaryName": "jio-sdk",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-gnu"
+    ]
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.4.0"
+  }
+}

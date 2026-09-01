@@ -1,0 +1,11 @@
+{
+  "name": "jio-client-monorepo",
+  "private": true,
+  "workspaces": [
+    "bindings/node"
+  ],
+  "scripts": {
+    "build:node": "npm run build --workspace @jio/sdk",
+    "test:node": "npm test --workspace @jio/sdk"
+  }
+}
