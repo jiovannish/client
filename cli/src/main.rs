@@ -21,7 +21,9 @@ const USAGE: &str = concat!(
     "  connect   [session-id] [options]                 Open an interactive shell\n",
     "  stop      <session-id> [options]                 Stop compute and retain files\n",
     "  start     <session-id> [options]                 Start with retained files\n",
-    "  destroy   [session-id] [options]                 Delete the VM and retained files",
+    "  destroy   [session-id] [options]                 Delete the VM and retained files\n",
+    "  login     <agent> [session-id] [options]         Use local agent login in a VM\n",
+    "  yolo      <agent> [session-id] [options]         Open an agent with full VM access",
 );
 
 const RUN_USAGE: &str = concat!(
@@ -78,6 +80,28 @@ const DESTROY_USAGE: &str = concat!(
     "  --host <host>              Override JIO_ENDPOINT or JIO_HOST",
 );
 
+const LOGIN_USAGE: &str = concat!(
+    "usage: jio login <agent> [session-id] [options]\n",
+    "\n",
+    "  Agent     Arguments\n",
+    "  codex     [session-id] [options]                 Use local Codex login in a VM\n",
+    "\n",
+    "  [session-id]               VM session ID; defaults to the current session\n",
+    "  --host <host>              Override JIO_ENDPOINT or JIO_HOST",
+);
+
+const YOLO_USAGE: &str = concat!(
+    "usage: jio yolo <agent> [session-id] [options]\n",
+    "\n",
+    "  Agent     Arguments\n",
+    "  codex     [session-id] [options]                 Open Codex without approvals or sandbox\n",
+    "\n",
+    "  [session-id]               VM session ID; defaults to the current session\n",
+    "  --host <host>              Override JIO_ENDPOINT or JIO_HOST\n",
+    "\n",
+    "Transfers the local Codex login, then opens Codex with approvals and its sandbox disabled.",
+);
+
 enum Invocation {
     Help(&'static str),
     Run {
@@ -111,6 +135,14 @@ enum Invocation {
     Start {
         host: String,
         id: String,
+    },
+    LoginCodex {
+        host: String,
+        id: Option<String>,
+    },
+    YoloCodex {
+        host: String,
+        id: Option<String>,
     },
 }
 
@@ -173,6 +205,14 @@ fn execute(invocation: Invocation) -> io::Result<()> {
             );
             Ok(())
         }
+        Invocation::LoginCodex { host, id } => {
+            let (id, status) = session::codex_login(host, id.as_deref())?;
+            io::stdout().write_all(&status.stdout)?;
+            io::stderr().write_all(&status.stderr)?;
+            println!("Codex login installed in VM {id}.");
+            Ok(())
+        }
+        Invocation::YoloCodex { host, id } => session::codex_yolo(host, id.as_deref()),
     }
 }
 
@@ -274,6 +314,12 @@ fn options_from(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
             session_options(arguments, SessionAction::Start)
         }
         Some(command) if command == OsStr::new("destroy") => destroy_options(arguments),
+        Some(command) if command == OsStr::new("login") => {
+            agent_options(arguments, AgentAction::Login)
+        }
+        Some(command) if command == OsStr::new("yolo") => {
+            agent_options(arguments, AgentAction::Yolo)
+        }
         _ => Err(usage(USAGE)),
     }
 }
@@ -282,6 +328,38 @@ fn connect_options(arguments: impl Iterator<Item = OsString>) -> io::Result<Invo
     match optional_session_target(arguments, CONNECT_USAGE)? {
         Some((host, id)) => Ok(Invocation::Connect { host, id }),
         None => Ok(Invocation::Help(CONNECT_USAGE)),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AgentAction {
+    Login,
+    Yolo,
+}
+
+fn agent_options(
+    mut arguments: impl Iterator<Item = OsString>,
+    action: AgentAction,
+) -> io::Result<Invocation> {
+    let command_usage = action.usage();
+    match arguments.next().as_deref() {
+        Some(agent) if is_help(agent) => Ok(Invocation::Help(command_usage)),
+        Some(agent) if agent == OsStr::new("codex") => agent_session_options(arguments, action),
+        _ => Err(usage(command_usage)),
+    }
+}
+
+fn agent_session_options(
+    arguments: impl Iterator<Item = OsString>,
+    action: AgentAction,
+) -> io::Result<Invocation> {
+    let command_usage = action.usage();
+    let Some((host, id)) = optional_session_target(arguments, command_usage)? else {
+        return Ok(Invocation::Help(command_usage));
+    };
+    match action {
+        AgentAction::Login => Ok(Invocation::LoginCodex { host, id }),
+        AgentAction::Yolo => Ok(Invocation::YoloCodex { host, id }),
     }
 }
 
@@ -312,6 +390,15 @@ fn optional_session_target(
         }
     }
     Ok(Some((session::host(host)?, id)))
+}
+
+impl AgentAction {
+    fn usage(self) -> &'static str {
+        match self {
+            Self::Login => LOGIN_USAGE,
+            Self::Yolo => YOLO_USAGE,
+        }
+    }
 }
 
 fn run_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invocation> {
@@ -610,8 +697,8 @@ fn usage(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONNECT_USAGE, CREATE_USAGE, DESTROY_USAGE, EXEC_USAGE, Invocation, RUN_USAGE, START_USAGE,
-        STOP_USAGE, USAGE, options_from, prompt_connect, prompt_destroy,
+        CONNECT_USAGE, CREATE_USAGE, DESTROY_USAGE, EXEC_USAGE, Invocation, LOGIN_USAGE, RUN_USAGE,
+        START_USAGE, STOP_USAGE, USAGE, YOLO_USAGE, options_from, prompt_connect, prompt_destroy,
     };
     use std::ffi::OsString;
     use std::io::Cursor;
@@ -686,6 +773,44 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn parses_login_codex_for_an_existing_session() {
+        let invocation = options_from(
+            [
+                "login",
+                "codex",
+                "abababababababababababababababab",
+                "--host",
+                "ubuntu@host",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        );
+        assert!(matches!(
+            invocation,
+            Ok(Invocation::LoginCodex { id: Some(id), .. })
+                if id == "abababababababababababababababab"
+        ));
+    }
+
+    #[test]
+    fn parses_yolo_codex_with_the_current_session() {
+        let invocation = options_from(
+            ["yolo", "codex", "--host", "ubuntu@host"]
+                .into_iter()
+                .map(OsString::from),
+        );
+        assert!(matches!(
+            invocation,
+            Ok(Invocation::YoloCodex { id: None, .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_the_old_nested_codex_command() {
+        assert!(options_from(["codex", "yolo"].into_iter().map(OsString::from)).is_err());
     }
 
     #[test]
@@ -769,6 +894,8 @@ mod tests {
             ("exec", EXEC_USAGE),
             ("stop", STOP_USAGE),
             ("start", START_USAGE),
+            ("login", LOGIN_USAGE),
+            ("yolo", YOLO_USAGE),
         ] {
             let message = options_from([command].into_iter().map(OsString::from))
                 .err()
@@ -787,9 +914,16 @@ mod tests {
             ("stop", STOP_USAGE),
             ("start", START_USAGE),
             ("destroy", DESTROY_USAGE),
+            ("login", LOGIN_USAGE),
+            ("yolo", YOLO_USAGE),
         ] {
             let invocation = options_from([command, "--help"].into_iter().map(OsString::from));
             assert!(matches!(invocation, Ok(Invocation::Help(help)) if help == expected));
         }
+
+        let invocation = options_from(["login", "codex", "--help"].into_iter().map(OsString::from));
+        assert!(matches!(invocation, Ok(Invocation::Help(help)) if help == LOGIN_USAGE));
+        let invocation = options_from(["yolo", "codex", "--help"].into_iter().map(OsString::from));
+        assert!(matches!(invocation, Ok(Invocation::Help(help)) if help == YOLO_USAGE));
     }
 }
