@@ -13,8 +13,7 @@ try {
     Buffer.from("hello from Node.js\n"),
   );
   const result = await vm.exec(
-    "python -c \"from pathlib import Path; " +
-      "print(Path('/home/jio/message.txt').read_text().upper(), end='')\"",
+    "tr '[:lower:]' '[:upper:]' < /home/jio/message.txt",
   );
   if (!result.success) {
     throw new Error(result.stderr.toString("utf8"));
