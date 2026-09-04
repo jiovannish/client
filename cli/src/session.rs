@@ -1,4 +1,4 @@
-use jio_client::{CommandResult, Session, VmClient};
+use jio_client::{CommandResult, PreparedConnection, Session, VmClient};
 use std::env;
 use std::ffi::OsString;
 use std::io;
@@ -9,6 +9,17 @@ pub fn create(host: String) -> io::Result<Session> {
     let session = client.create()?.session();
     client.set_current_session_id(&session.session_id)?;
     Ok(session)
+}
+
+pub fn accept_create_and_report_id(host: String, report: impl FnOnce(&str)) -> io::Result<String> {
+    let client = client(host)?;
+    let id = client.accept_create_and_report_id(report)?;
+    client.set_current_session_id(&id)?;
+    Ok(id)
+}
+
+pub fn prepare_connect(host: String, id: &str) -> io::Result<PreparedConnection> {
+    client(host)?.attach(id)?.prepare_connection()
 }
 
 pub fn connect(host: String, id: Option<&str>) -> io::Result<()> {

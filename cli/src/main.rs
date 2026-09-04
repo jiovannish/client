@@ -7,6 +7,8 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 const USAGE: &str = concat!(
@@ -175,8 +177,62 @@ fn execute(invocation: Invocation) -> io::Result<()> {
 }
 
 fn create(host: String) -> io::Result<()> {
-    println!("{}", session::create(host)?.session_id);
-    Ok(())
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        println!("{}", session::create(host)?.session_id);
+        return Ok(());
+    }
+
+    let (report_id, receive_id) = mpsc::sync_channel(1);
+    let (report_acceptance, receive_acceptance) = mpsc::sync_channel(1);
+    let (report_ready, receive_ready) = mpsc::sync_channel(1);
+    let create_host = host.clone();
+    thread::spawn(move || {
+        let mut id_reported = false;
+        let accepted = session::accept_create_and_report_id(create_host.clone(), |id| {
+            id_reported = true;
+            let _ = report_id.send(Ok(id.to_owned()));
+        });
+        match accepted {
+            Ok(id) => {
+                if report_acceptance.send(Ok(id.clone())).is_ok() {
+                    let ready = session::prepare_connect(create_host, &id);
+                    let _ = report_ready.send(ready);
+                }
+            }
+            Err(failure) => {
+                if id_reported {
+                    let _ = report_acceptance.send(Err(failure));
+                } else {
+                    let _ = report_id.send(Err(failure));
+                }
+            }
+        }
+    });
+
+    let id = receive_id
+        .recv()
+        .map_err(|_| io::Error::other("session creation ended before reporting its ID"))??;
+    let connect = (|| {
+        let input = io::stdin();
+        let output = io::stdout();
+        let mut input = input.lock();
+        let mut output = output.lock();
+        writeln!(output, "Creating VM: {id}")?;
+        prompt_connect(&mut input, &mut output)
+    })()?;
+    let accepted = receive_acceptance
+        .recv()
+        .map_err(|_| io::Error::other("session creation ended before Core accepted it"))??;
+    if accepted != id {
+        return Err(io::Error::other("accepted session ID changed"));
+    }
+    if !connect {
+        return Ok(());
+    }
+    receive_ready
+        .recv()
+        .map_err(|_| io::Error::other("session readiness watcher ended without a result"))??
+        .connect()
 }
 
 fn destroy(host: String, id: Option<&str>, yes: bool) -> io::Result<()> {
@@ -500,6 +556,10 @@ fn is_help(value: &OsStr) -> bool {
     value == OsStr::new("--help") || value == OsStr::new("-h")
 }
 
+fn prompt_connect(input: &mut impl BufRead, output: &mut impl Write) -> io::Result<bool> {
+    prompt_yes_no(input, output, "Do you want to connect now? [Y/n] ", true)
+}
+
 fn prompt_destroy(input: &mut impl BufRead, output: &mut impl Write, id: &str) -> io::Result<bool> {
     writeln!(output, "Destroy VM {id} and all retained files?")?;
     writeln!(output, "\x1b[31mThis action cannot be undone.\x1b[0m")?;
@@ -551,7 +611,7 @@ fn usage(message: &'static str) -> io::Error {
 mod tests {
     use super::{
         CONNECT_USAGE, CREATE_USAGE, DESTROY_USAGE, EXEC_USAGE, Invocation, RUN_USAGE, START_USAGE,
-        STOP_USAGE, USAGE, options_from, prompt_destroy,
+        STOP_USAGE, USAGE, options_from, prompt_connect, prompt_destroy,
     };
     use std::ffi::OsString;
     use std::io::Cursor;
@@ -654,6 +714,19 @@ mod tests {
                 && command == "sudo apt-get update -qq"
                 && timeout == Duration::from_secs(600)
         ));
+    }
+
+    #[test]
+    fn asks_whether_to_connect_after_creation() {
+        for (answer, expected) in [("\n", true), ("Yes\n", true), ("n\n", false)] {
+            let mut input = Cursor::new(answer.as_bytes());
+            let mut output = Vec::new();
+            assert_eq!(prompt_connect(&mut input, &mut output).ok(), Some(expected));
+            assert_eq!(
+                String::from_utf8(output).ok().as_deref(),
+                Some("Do you want to connect now? [Y/n] ")
+            );
+        }
     }
 
     #[test]
