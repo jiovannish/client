@@ -23,7 +23,8 @@ const USAGE: &str = concat!(
     "  start     <session-id> [options]                 Start with retained files\n",
     "  destroy   [session-id] [options]                 Delete the VM and retained files\n",
     "  login     <agent> [session-id] [options]         Use local agent login in a VM\n",
-    "  yolo      <agent> [session-id] [options]         Open an agent with full VM access",
+    "  yolo      <agent> [session-id] [options]         Open an agent with full VM access\n",
+    "  completion <shell>                               Print shell completion setup",
 );
 
 const RUN_USAGE: &str = concat!(
@@ -102,6 +103,106 @@ const YOLO_USAGE: &str = concat!(
     "Transfers the local Codex login, then opens Codex with approvals and its sandbox disabled.",
 );
 
+const COMPLETION_USAGE: &str = concat!(
+    "usage: jio completion <shell>\n",
+    "\n",
+    "  Shell\n",
+    "  zsh                       Print completion setup for Zsh\n",
+    "  bash                      Print completion setup for Bash\n",
+    "  fish                      Print completion setup for Fish",
+);
+
+const ZSH_COMPLETION: &str = r#"#compdef jio
+
+if (( ! $+functions[compdef] )); then
+  autoload -Uz compinit
+  compinit
+fi
+
+_jio() {
+  local -a commands agents shells options
+  commands=(run create exec connect stop start destroy login yolo completion)
+  agents=(codex)
+  shells=(zsh bash fish)
+
+  if (( CURRENT == 2 )); then
+    compadd -- $commands
+    return
+  fi
+
+  case "${words[2]}" in
+    login|yolo)
+      if (( CURRENT == 3 )); then
+        compadd -- $agents
+        return
+      fi
+      options=(--host --help -h)
+      ;;
+    completion)
+      if (( CURRENT == 3 )); then
+        compadd -- $shells
+        return
+      fi
+      options=(--help -h)
+      ;;
+    run)
+      options=(--language --instances --concurrency --host --help -h)
+      ;;
+    exec)
+      options=(--timeout --host --help -h)
+      ;;
+    destroy)
+      options=(--yes --host --help -h)
+      ;;
+    create|connect|stop|start)
+      options=(--host --help -h)
+      ;;
+  esac
+  if [[ "$PREFIX" == -* ]]; then
+    compadd -- $options
+  fi
+}
+
+compdef _jio jio"#;
+
+const BASH_COMPLETION: &str = r#"_jio_completion() {
+  local current command
+  current="${COMP_WORDS[COMP_CWORD]}"
+  command="${COMP_WORDS[1]}"
+
+  if [[ $COMP_CWORD -eq 1 ]]; then
+    COMPREPLY=($(compgen -W 'run create exec connect stop start destroy login yolo completion' -- "$current"))
+    return
+  fi
+  if [[ $COMP_CWORD -eq 2 && ( $command == login || $command == yolo ) ]]; then
+    COMPREPLY=($(compgen -W 'codex' -- "$current"))
+    return
+  fi
+  if [[ $COMP_CWORD -eq 2 && $command == completion ]]; then
+    COMPREPLY=($(compgen -W 'zsh bash fish' -- "$current"))
+    return
+  fi
+
+  case "$command" in
+    run)       COMPREPLY=($(compgen -W '--language --instances --concurrency --host --help -h' -- "$current")) ;;
+    exec)      COMPREPLY=($(compgen -W '--timeout --host --help -h' -- "$current")) ;;
+    destroy)   COMPREPLY=($(compgen -W '--yes --host --help -h' -- "$current")) ;;
+    login|yolo|create|connect|stop|start)
+               COMPREPLY=($(compgen -W '--host --help -h' -- "$current")) ;;
+  esac
+}
+
+complete -F _jio_completion jio"#;
+
+const FISH_COMPLETION: &str = r#"complete -c jio -f
+complete -c jio -n '__fish_use_subcommand' -a 'run create exec connect stop start destroy login yolo completion'
+complete -c jio -n '__fish_seen_subcommand_from login yolo; and test (count (commandline -opc)) -eq 2' -a codex
+complete -c jio -n '__fish_seen_subcommand_from completion; and test (count (commandline -opc)) -eq 2' -a 'zsh bash fish'
+complete -c jio -n '__fish_seen_subcommand_from run' -l language -l instances -l concurrency -l host
+complete -c jio -n '__fish_seen_subcommand_from exec' -l timeout -l host
+complete -c jio -n '__fish_seen_subcommand_from destroy' -l yes -l host
+complete -c jio -n '__fish_seen_subcommand_from create connect stop start login yolo' -l host"#;
+
 enum Invocation {
     Help(&'static str),
     Run {
@@ -144,6 +245,16 @@ enum Invocation {
         host: String,
         id: Option<String>,
     },
+    Completion {
+        shell: CompletionShell,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum CompletionShell {
+    Zsh,
+    Bash,
+    Fish,
 }
 
 fn main() -> ExitCode {
@@ -213,6 +324,10 @@ fn execute(invocation: Invocation) -> io::Result<()> {
             Ok(())
         }
         Invocation::YoloCodex { host, id } => session::codex_yolo(host, id.as_deref()),
+        Invocation::Completion { shell } => {
+            println!("{}", shell.script());
+            Ok(())
+        }
     }
 }
 
@@ -320,7 +435,32 @@ fn options_from(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
         Some(command) if command == OsStr::new("yolo") => {
             agent_options(arguments, AgentAction::Yolo)
         }
+        Some(command) if command == OsStr::new("completion") => completion_options(arguments),
         _ => Err(usage(USAGE)),
+    }
+}
+
+fn completion_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invocation> {
+    let shell = match arguments.next().as_deref() {
+        Some(shell) if is_help(shell) => return Ok(Invocation::Help(COMPLETION_USAGE)),
+        Some(shell) if shell == OsStr::new("zsh") => CompletionShell::Zsh,
+        Some(shell) if shell == OsStr::new("bash") => CompletionShell::Bash,
+        Some(shell) if shell == OsStr::new("fish") => CompletionShell::Fish,
+        _ => return Err(usage(COMPLETION_USAGE)),
+    };
+    if arguments.next().is_some() {
+        return Err(usage(COMPLETION_USAGE));
+    }
+    Ok(Invocation::Completion { shell })
+}
+
+impl CompletionShell {
+    fn script(self) -> &'static str {
+        match self {
+            Self::Zsh => ZSH_COMPLETION,
+            Self::Bash => BASH_COMPLETION,
+            Self::Fish => FISH_COMPLETION,
+        }
     }
 }
 
@@ -697,8 +837,9 @@ fn usage(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONNECT_USAGE, CREATE_USAGE, DESTROY_USAGE, EXEC_USAGE, Invocation, LOGIN_USAGE, RUN_USAGE,
-        START_USAGE, STOP_USAGE, USAGE, YOLO_USAGE, options_from, prompt_connect, prompt_destroy,
+        COMPLETION_USAGE, CONNECT_USAGE, CREATE_USAGE, CompletionShell, DESTROY_USAGE, EXEC_USAGE,
+        Invocation, LOGIN_USAGE, RUN_USAGE, START_USAGE, STOP_USAGE, USAGE, YOLO_USAGE,
+        options_from, prompt_connect, prompt_destroy,
     };
     use std::ffi::OsString;
     use std::io::Cursor;
@@ -814,6 +955,18 @@ mod tests {
     }
 
     #[test]
+    fn prints_completion_with_nested_codex_agents() {
+        let invocation = options_from(["completion", "zsh"].into_iter().map(OsString::from));
+        assert!(matches!(
+            invocation,
+            Ok(Invocation::Completion {
+                shell: CompletionShell::Zsh
+            })
+        ));
+        assert!(CompletionShell::Zsh.script().contains("agents=(codex)"));
+    }
+
+    #[test]
     fn parses_a_bounded_session_command() {
         let invocation = options_from(
             [
@@ -896,6 +1049,7 @@ mod tests {
             ("start", START_USAGE),
             ("login", LOGIN_USAGE),
             ("yolo", YOLO_USAGE),
+            ("completion", COMPLETION_USAGE),
         ] {
             let message = options_from([command].into_iter().map(OsString::from))
                 .err()
@@ -916,6 +1070,7 @@ mod tests {
             ("destroy", DESTROY_USAGE),
             ("login", LOGIN_USAGE),
             ("yolo", YOLO_USAGE),
+            ("completion", COMPLETION_USAGE),
         ] {
             let invocation = options_from([command, "--help"].into_iter().map(OsString::from));
             assert!(matches!(invocation, Ok(Invocation::Help(help)) if help == expected));
