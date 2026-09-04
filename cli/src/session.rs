@@ -3,8 +3,8 @@ use std::env;
 use std::ffi::OsString;
 use std::io;
 
-pub fn create(host: String, runtime: &str) -> io::Result<Session> {
-    Ok(client(host)?.create(runtime)?.session().clone())
+pub fn create(host: String) -> io::Result<Session> {
+    Ok(client(host)?.create()?.session())
 }
 
 pub fn connect(host: String, id: &str) -> io::Result<()> {
@@ -21,13 +21,6 @@ fn client(host: String) -> io::Result<VmClient> {
     VmClient::new(host, api_key)
 }
 
-pub fn runtime(language: &str) -> io::Result<&'static str> {
-    match language {
-        "python" => Ok("python3.12-source-v0"),
-        _ => Err(invalid(format!("unsupported language: {language}"))),
-    }
-}
-
 pub fn host(value: Option<OsString>) -> io::Result<String> {
     value
         .map(|value| {
@@ -42,15 +35,4 @@ pub fn host(value: Option<OsString>) -> io::Result<String> {
 
 fn invalid(message: impl ToString) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::runtime;
-
-    #[test]
-    fn maps_only_the_session_template_language() {
-        assert_eq!(runtime("python").ok(), Some("python3.12-source-v0"));
-        assert!(runtime("rust").is_err());
-    }
 }

@@ -21,8 +21,8 @@ class AsyncJio:
     def endpoint(self) -> str:
         return self._sync.endpoint
 
-    async def create(self, runtime: Optional[str] = None) -> "AsyncVm":
-        vm = await asyncio.to_thread(self._sync.create, runtime)
+    async def create(self) -> "AsyncVm":
+        vm = await asyncio.to_thread(self._sync.create)
         return AsyncVm(vm)
 
     async def inspect(self, session_id: str) -> Session:
@@ -34,6 +34,12 @@ class AsyncJio:
     async def attach(self, session_id: str) -> "AsyncVm":
         vm = await asyncio.to_thread(self._sync.attach, session_id)
         return AsyncVm(vm)
+
+    async def stop(self, session_id: str) -> Session:
+        return await asyncio.to_thread(self._sync.stop, session_id)
+
+    async def start(self, session_id: str) -> Session:
+        return await asyncio.to_thread(self._sync.start, session_id)
 
     async def destroy(self, session_id: str) -> None:
         await asyncio.to_thread(self._sync.destroy, session_id)
@@ -90,6 +96,12 @@ class AsyncVm:
             remote_path,
             timeout=timeout,
         )
+
+    async def stop(self) -> Session:
+        return await asyncio.to_thread(self._sync.stop)
+
+    async def start(self) -> Session:
+        return await asyncio.to_thread(self._sync.start)
 
     async def destroy(self) -> None:
         await asyncio.to_thread(self._sync.destroy)

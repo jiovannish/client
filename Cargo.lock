@@ -673,6 +673,7 @@ name = "jio-client"
 version = "0.1.0"
 dependencies = [
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
@@ -1168,6 +1169,7 @@ checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
 dependencies = [
  "bitflags",
  "errno",
+ "itoa",
  "libc",
  "linux-raw-sys",
  "windows-sys 0.59.0",

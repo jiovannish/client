@@ -32,18 +32,38 @@ pub struct OperationOptions {
 #[napi(object)]
 pub struct SessionInfo {
     pub session_id: String,
-    #[napi(ts_type = "'ready' | 'failed' | 'destroyed'")]
+    #[napi(ts_type = "'starting' | 'ready' | 'stopping' | 'stopped' | 'failed' | 'destroyed'")]
     pub state: String,
-    pub runtime: String,
+    pub generation: BigInt,
+    pub runtime: Option<String>,
     pub template_id: String,
     pub core_sha256: String,
+    pub volume_id: String,
+    pub system_files_volume_id: Option<String>,
+    pub workspace_path: String,
     pub guest_ipv4: String,
     pub ssh_port: u16,
     pub ssh_username: String,
     pub ssh_host_public_key: String,
+    pub volume_create_ns: Option<BigInt>,
+    pub storage_attach_ns: Option<BigInt>,
+    pub worker_spawn_ns: Option<BigInt>,
+    pub worker_template_prepare_ns: Option<BigInt>,
+    pub cow_fork_ns: Option<BigInt>,
+    pub vm_create_ns: Option<BigInt>,
+    pub state_restore_ns: Option<BigInt>,
+    pub device_restore_ns: Option<BigInt>,
+    pub vsock_transport_reset_ns: Option<BigInt>,
+    pub vsock_connect_ns: Option<BigInt>,
+    pub vsock_init_ns: Option<BigInt>,
     pub guest_ready_ns: BigInt,
+    pub system_files_ready_ns: Option<BigInt>,
+    pub storage_ready_ns: BigInt,
     pub network_ready_ns: BigInt,
     pub ssh_ready_ns: BigInt,
+    pub access_probe_ns: Option<BigInt>,
+    pub worker_ready_ns: Option<BigInt>,
+    pub session_ready_ns: Option<BigInt>,
 }
 
 #[napi(object)]
@@ -86,10 +106,9 @@ impl JsJio {
     }
 
     #[napi(ts_return_type = "Promise<Vm>")]
-    pub fn create(&self, runtime: Option<String>) -> AsyncTask<CreateTask> {
+    pub fn create(&self) -> AsyncTask<CreateTask> {
         AsyncTask::new(CreateTask {
             client: self.inner.clone(),
-            runtime,
         })
     }
 
@@ -117,6 +136,24 @@ impl JsJio {
         })
     }
 
+    #[napi(ts_return_type = "Promise<SessionInfo>")]
+    pub fn stop(&self, session_id: String) -> AsyncTask<LifecycleTask> {
+        AsyncTask::new(LifecycleTask {
+            client: self.inner.clone(),
+            session_id,
+            action: LifecycleAction::Stop,
+        })
+    }
+
+    #[napi(ts_return_type = "Promise<SessionInfo>")]
+    pub fn start(&self, session_id: String) -> AsyncTask<LifecycleTask> {
+        AsyncTask::new(LifecycleTask {
+            client: self.inner.clone(),
+            session_id,
+            action: LifecycleAction::Start,
+        })
+    }
+
     #[napi(ts_return_type = "Promise<void>")]
     pub fn destroy(&self, session_id: String) -> AsyncTask<DestroyTask> {
         AsyncTask::new(DestroyTask {
@@ -140,7 +177,7 @@ impl JsVm {
 
     #[napi(getter)]
     pub fn session(&self) -> SessionInfo {
-        session_info(self.inner.session())
+        session_info(&self.inner.session())
     }
 
     #[napi(ts_return_type = "Promise<SessionInfo>")]
@@ -199,6 +236,22 @@ impl JsVm {
         }))
     }
 
+    #[napi(ts_return_type = "Promise<SessionInfo>")]
+    pub fn stop(&self) -> AsyncTask<VmLifecycleTask> {
+        AsyncTask::new(VmLifecycleTask {
+            vm: self.inner.clone(),
+            action: LifecycleAction::Stop,
+        })
+    }
+
+    #[napi(ts_return_type = "Promise<SessionInfo>")]
+    pub fn start(&self) -> AsyncTask<VmLifecycleTask> {
+        AsyncTask::new(VmLifecycleTask {
+            vm: self.inner.clone(),
+            action: LifecycleAction::Start,
+        })
+    }
+
     #[napi(ts_return_type = "Promise<void>")]
     pub fn destroy(&self) -> AsyncTask<DestroyVmTask> {
         AsyncTask::new(DestroyVmTask {
@@ -209,7 +262,6 @@ impl JsVm {
 
 pub struct CreateTask {
     client: VmClient,
-    runtime: Option<String>,
 }
 
 impl Task for CreateTask {
@@ -217,15 +269,62 @@ impl Task for CreateTask {
     type JsValue = JsVm;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        match &self.runtime {
-            Some(runtime) => self.client.create(runtime),
-            None => self.client.create_default(),
-        }
-        .map_err(to_node_error)
+        self.client.create().map_err(to_node_error)
     }
 
     fn resolve(&mut self, _env: Env, inner: Self::Output) -> Result<Self::JsValue> {
         Ok(JsVm { inner })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LifecycleAction {
+    Stop,
+    Start,
+}
+
+pub struct LifecycleTask {
+    client: VmClient,
+    session_id: String,
+    action: LifecycleAction,
+}
+
+impl Task for LifecycleTask {
+    type Output = Session;
+    type JsValue = SessionInfo;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        match self.action {
+            LifecycleAction::Stop => self.client.stop(&self.session_id),
+            LifecycleAction::Start => self.client.start(&self.session_id),
+        }
+        .map_err(to_node_error)
+    }
+
+    fn resolve(&mut self, _env: Env, session: Self::Output) -> Result<Self::JsValue> {
+        Ok(session_info(&session))
+    }
+}
+
+pub struct VmLifecycleTask {
+    vm: CoreVm,
+    action: LifecycleAction,
+}
+
+impl Task for VmLifecycleTask {
+    type Output = Session;
+    type JsValue = SessionInfo;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        match self.action {
+            LifecycleAction::Stop => self.vm.stop(),
+            LifecycleAction::Start => self.vm.start(),
+        }
+        .map_err(to_node_error)
+    }
+
+    fn resolve(&mut self, _env: Env, session: Self::Output) -> Result<Self::JsValue> {
+        Ok(session_info(&session))
     }
 }
 
@@ -391,22 +490,45 @@ fn session_info(session: &Session) -> SessionInfo {
     SessionInfo {
         session_id: session.session_id.clone(),
         state: state_name(session.state).into(),
+        generation: BigInt::from(session.generation),
         runtime: session.runtime.clone(),
         template_id: session.template_id.clone(),
         core_sha256: session.core_sha256.clone(),
+        volume_id: session.volume_id.clone(),
+        system_files_volume_id: session.system_files_volume_id.clone(),
+        workspace_path: session.workspace_path.clone(),
         guest_ipv4: session.guest_ipv4.to_string(),
         ssh_port: session.ssh_port,
         ssh_username: session.ssh_username.clone(),
         ssh_host_public_key: session.ssh_host_public_key.clone(),
+        volume_create_ns: session.volume_create_ns.map(BigInt::from),
+        storage_attach_ns: session.storage_attach_ns.map(BigInt::from),
+        worker_spawn_ns: session.worker_spawn_ns.map(BigInt::from),
+        worker_template_prepare_ns: session.worker_template_prepare_ns.map(BigInt::from),
+        cow_fork_ns: session.cow_fork_ns.map(BigInt::from),
+        vm_create_ns: session.vm_create_ns.map(BigInt::from),
+        state_restore_ns: session.state_restore_ns.map(BigInt::from),
+        device_restore_ns: session.device_restore_ns.map(BigInt::from),
+        vsock_transport_reset_ns: session.vsock_transport_reset_ns.map(BigInt::from),
+        vsock_connect_ns: session.vsock_connect_ns.map(BigInt::from),
+        vsock_init_ns: session.vsock_init_ns.map(BigInt::from),
         guest_ready_ns: BigInt::from(session.guest_ready_ns),
+        system_files_ready_ns: session.system_files_ready_ns.map(BigInt::from),
+        storage_ready_ns: BigInt::from(session.storage_ready_ns),
         network_ready_ns: BigInt::from(session.network_ready_ns),
         ssh_ready_ns: BigInt::from(session.ssh_ready_ns),
+        access_probe_ns: session.access_probe_ns.map(BigInt::from),
+        worker_ready_ns: session.worker_ready_ns.map(BigInt::from),
+        session_ready_ns: session.session_ready_ns.map(BigInt::from),
     }
 }
 
 fn state_name(state: SessionState) -> &'static str {
     match state {
+        SessionState::Starting => "starting",
         SessionState::Ready => "ready",
+        SessionState::Stopping => "stopping",
+        SessionState::Stopped => "stopped",
         SessionState::Failed => "failed",
         SessionState::Destroyed => "destroyed",
     }

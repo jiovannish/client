@@ -17,7 +17,6 @@ enum Invocation {
     },
     Create {
         host: String,
-        runtime: &'static str,
     },
     Connect {
         host: String,
@@ -47,8 +46,8 @@ fn execute(invocation: Invocation) -> io::Result<()> {
             instances,
             concurrency,
         } => app::run(source, host, instances, concurrency),
-        Invocation::Create { host, runtime } => {
-            let created = session::create(host, runtime)?;
+        Invocation::Create { host } => {
+            let created = session::create(host)?;
             println!("{}", created.session_id);
             Ok(())
         }
@@ -144,27 +143,18 @@ fn run_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invo
 
 fn create_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invocation> {
     let mut host = None;
-    let mut language = "python".to_owned();
-    let mut language_set = false;
     while let Some(argument) = arguments.next() {
         if argument == "--host" {
             if host.is_some() {
                 return Err(usage());
             }
             host = Some(arguments.next().ok_or_else(usage)?);
-        } else if argument == "--language" {
-            if language_set {
-                return Err(usage());
-            }
-            language = text(arguments.next(), "language")?;
-            language_set = true;
         } else {
             return Err(usage());
         }
     }
     Ok(Invocation::Create {
         host: session::host(host)?,
-        runtime: session::runtime(&language)?,
     })
 }
 
@@ -204,7 +194,7 @@ fn text(value: Option<OsString>, name: &str) -> io::Result<String> {
 fn usage() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        "expected: jio run <source> [options] | jio create [--language python] [--host <host>] | jio connect|attach <session-id> [--host <host>] | jio destroy <session-id> [--host <host>]",
+        "expected: jio run <source> [options] | jio create [--host <host>] | jio connect|attach <session-id> [--host <host>] | jio destroy <session-id> [--host <host>]",
     )
 }
 

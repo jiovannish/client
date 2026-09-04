@@ -3,10 +3,12 @@
 export declare class Jio {
   constructor(options?: JioOptions | undefined | null)
   get endpoint(): string
-  create(runtime?: string | undefined | null): Promise<Vm>
+  create(): Promise<Vm>
   inspect(sessionId: string): Promise<SessionInfo>
   get(sessionId: string): Promise<SessionInfo>
   attach(sessionId: string): Promise<Vm>
+  stop(sessionId: string): Promise<SessionInfo>
+  start(sessionId: string): Promise<SessionInfo>
   destroy(sessionId: string): Promise<void>
 }
 export type JsJio = Jio
@@ -18,6 +20,8 @@ export declare class Vm {
   exec(command: string, options?: ExecOptions | undefined | null): Promise<ExecResult>
   writeFile(remotePath: string, contents: Buffer, options?: OperationOptions | undefined | null): Promise<void>
   readFile(remotePath: string, options?: OperationOptions | undefined | null): Promise<Buffer>
+  stop(): Promise<SessionInfo>
+  start(): Promise<SessionInfo>
   destroy(): Promise<void>
 }
 export type JsVm = Vm
@@ -46,15 +50,35 @@ export interface OperationOptions {
 
 export interface SessionInfo {
   sessionId: string
-  state: 'ready' | 'failed' | 'destroyed'
-  runtime: string
+  state: 'starting' | 'ready' | 'stopping' | 'stopped' | 'failed' | 'destroyed'
+  generation: bigint
+  runtime?: string
   templateId: string
   coreSha256: string
+  volumeId: string
+  systemFilesVolumeId?: string
+  workspacePath: string
   guestIpv4: string
   sshPort: number
   sshUsername: string
   sshHostPublicKey: string
+  volumeCreateNs?: bigint
+  storageAttachNs?: bigint
+  workerSpawnNs?: bigint
+  workerTemplatePrepareNs?: bigint
+  cowForkNs?: bigint
+  vmCreateNs?: bigint
+  stateRestoreNs?: bigint
+  deviceRestoreNs?: bigint
+  vsockTransportResetNs?: bigint
+  vsockConnectNs?: bigint
+  vsockInitNs?: bigint
   guestReadyNs: bigint
+  systemFilesReadyNs?: bigint
+  storageReadyNs: bigint
   networkReadyNs: bigint
   sshReadyNs: bigint
+  accessProbeNs?: bigint
+  workerReadyNs?: bigint
+  sessionReadyNs?: bigint
 }

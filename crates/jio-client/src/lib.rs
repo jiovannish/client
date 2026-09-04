@@ -18,8 +18,8 @@ mod vm;
 
 #[cfg(unix)]
 pub use vm::{
-    CommandResult, DEFAULT_COMMAND_TIMEOUT, DEFAULT_RUNTIME, MAX_COMMAND_TIMEOUT, MAX_FILE_BYTES,
-    Vm, VmClient,
+    CommandResult, DEFAULT_COMMAND_TIMEOUT, MAX_COMMAND_TIMEOUT, MAX_FILE_BYTES,
+    PreparedConnection, Vm, VmClient,
 };
 
 pub const MAX_INSTANCES: usize = 64;
@@ -180,7 +180,10 @@ pub struct SessionClient {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
+    Starting,
     Ready,
+    Stopping,
+    Stopped,
     Failed,
     Destroyed,
 }
@@ -190,22 +193,78 @@ pub enum SessionState {
 pub struct Session {
     pub session_id: String,
     pub state: SessionState,
-    pub runtime: String,
+    pub generation: u64,
+    /// Present only when connected to the transitional runtime-selected Core API.
+    pub runtime: Option<String>,
     pub template_id: String,
     pub core_sha256: String,
+    pub volume_id: String,
+    pub system_files_volume_id: Option<String>,
+    pub workspace_path: String,
     pub guest_ipv4: Ipv4Addr,
     pub ssh_port: u16,
     pub ssh_username: String,
     pub ssh_host_public_key: String,
+    pub volume_create_ns: Option<u64>,
+    pub storage_attach_ns: Option<u64>,
+    pub worker_spawn_ns: Option<u64>,
+    pub worker_template_prepare_ns: Option<u64>,
+    pub cow_fork_ns: Option<u64>,
+    pub vm_create_ns: Option<u64>,
+    pub state_restore_ns: Option<u64>,
+    pub device_restore_ns: Option<u64>,
+    pub vsock_transport_reset_ns: Option<u64>,
+    pub vsock_connect_ns: Option<u64>,
+    pub vsock_init_ns: Option<u64>,
     pub guest_ready_ns: u64,
+    pub system_files_ready_ns: Option<u64>,
+    pub storage_ready_ns: u64,
     pub network_ready_ns: u64,
     pub ssh_ready_ns: u64,
+    pub access_probe_ns: Option<u64>,
+    pub worker_ready_ns: Option<u64>,
+    pub session_ready_ns: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ApiHealthResponse {
+    runtime: Option<String>,
 }
 
 #[derive(Serialize)]
 struct ApiCreateSessionRequest<'a> {
+    session_id: &'a str,
+    client_public_key: &'a str,
+}
+
+#[derive(Serialize)]
+struct ApiRuntimeCreateSessionRequest<'a> {
     runtime: &'a str,
     client_public_key: &'a str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CreateContract {
+    CallerAssignedId,
+    ServerAssignedId { runtime: String },
+}
+
+impl CreateContract {
+    pub(crate) fn caller_assigns_id(&self) -> bool {
+        matches!(self, Self::CallerAssignedId)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApiCreateSessionAccepted {
+    session_id: String,
+    state: SessionState,
+}
+
+enum SessionResponse {
+    Starting,
+    Complete(Box<Session>),
 }
 
 impl SessionClient {
@@ -233,35 +292,90 @@ impl SessionClient {
         })
     }
 
-    pub fn create(&self, runtime: &str, client_public_key: &str) -> io::Result<Session> {
-        if !is_runtime(runtime) {
-            return Err(invalid("runtime identifier is invalid"));
+    pub fn create(&self, id: &str, client_public_key: &str) -> io::Result<Session> {
+        let contract = self.create_contract()?;
+        self.create_with_contract(&contract, id, client_public_key)
+    }
+
+    pub(crate) fn create_contract(&self) -> io::Result<CreateContract> {
+        let connection = Connection::open(&self.endpoint, &self.api_key, DEFAULT_REQUEST_TIMEOUT)?;
+        let response = connection
+            .client
+            .get(format!("{}/v0/health", connection.base_url))
+            .bearer_auth(&connection.api_key)
+            .send()
+            .map_err(other)?;
+        let health: ApiHealthResponse = decode(response)?;
+        create_contract_from_health(health)
+    }
+
+    pub(crate) fn create_with_contract(
+        &self,
+        contract: &CreateContract,
+        id: &str,
+        client_public_key: &str,
+    ) -> io::Result<Session> {
+        match self.request_create(contract, id, client_public_key, false)? {
+            SessionResponse::Complete(session) if session.state == SessionState::Ready => {
+                Ok(*session)
+            }
+            SessionResponse::Complete(_) | SessionResponse::Starting => Err(invalid(
+                "endpoint did not complete synchronous session creation",
+            )),
+        }
+    }
+
+    pub(crate) fn accept_create_with_contract(
+        &self,
+        contract: &CreateContract,
+        id: &str,
+        client_public_key: &str,
+    ) -> io::Result<Option<Session>> {
+        match self.request_create(contract, id, client_public_key, true)? {
+            SessionResponse::Starting => Ok(None),
+            SessionResponse::Complete(session) if session.state == SessionState::Ready => {
+                Ok(Some(*session))
+            }
+            SessionResponse::Complete(_) => Err(invalid(
+                "endpoint returned an inconsistent asynchronous creation result",
+            )),
+        }
+    }
+
+    fn request_create(
+        &self,
+        contract: &CreateContract,
+        id: &str,
+        client_public_key: &str,
+        respond_async: bool,
+    ) -> io::Result<SessionResponse> {
+        if !valid_session_id(id) {
+            return Err(invalid("session ID is invalid"));
         }
         if !valid_ssh_public_key(client_public_key) {
             return Err(invalid(
                 "client public key is not one strict ssh-ed25519 key",
             ));
         }
-        let connection = Connection::open(&self.endpoint, &self.api_key, CREATE_SESSION_TIMEOUT)?;
-        let body = serde_json::to_vec(&ApiCreateSessionRequest {
-            runtime,
-            client_public_key,
-        })
-        .map_err(other)?;
-        let response = connection
+        let asynchronous = respond_async && contract.caller_assigns_id();
+        let timeout = if asynchronous {
+            DEFAULT_REQUEST_TIMEOUT
+        } else {
+            CREATE_SESSION_TIMEOUT
+        };
+        let connection = Connection::open(&self.endpoint, &self.api_key, timeout)?;
+        let body = encode_create_request(contract, id, client_public_key)?;
+        let mut request = connection
             .client
             .post(format!("{}/v0/sessions", connection.base_url))
             .bearer_auth(&connection.api_key)
             .header(CONTENT_TYPE, "application/json")
-            .body(body)
-            .send()
-            .map_err(other)?;
-        let session: Session = decode(response)?;
-        validate_session(&session)?;
-        if session.runtime != runtime || session.state != SessionState::Ready {
-            return Err(invalid("endpoint returned an inconsistent created session"));
+            .body(body);
+        if asynchronous {
+            request = request.header("prefer", "respond-async");
         }
-        Ok(session)
+        let response = request.send().map_err(other)?;
+        decode_session_response(response, contract.caller_assigns_id().then_some(id))
     }
 
     pub fn get(&self, id: &str) -> io::Result<Session> {
@@ -269,18 +383,42 @@ impl SessionClient {
             return Err(invalid("session ID is invalid"));
         }
         let connection = Connection::open(&self.endpoint, &self.api_key, DEFAULT_REQUEST_TIMEOUT)?;
-        let response = connection
-            .client
-            .get(format!("{}/v0/sessions/{id}", connection.base_url))
-            .bearer_auth(&connection.api_key)
-            .send()
-            .map_err(other)?;
-        let session: Session = decode(response)?;
-        validate_session(&session)?;
-        if session.session_id != id {
-            return Err(invalid("endpoint returned a different session ID"));
+        match get_session_response(&connection, id)? {
+            SessionResponse::Complete(session) => Ok(*session),
+            SessionResponse::Starting => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("session {id} is still starting"),
+            )),
         }
-        Ok(session)
+    }
+
+    pub(crate) fn wait_until_created(&self, id: &str) -> io::Result<Session> {
+        if !valid_session_id(id) {
+            return Err(invalid("session ID is invalid"));
+        }
+        let connection = Connection::open(&self.endpoint, &self.api_key, CREATE_SESSION_TIMEOUT)?;
+        let started = Instant::now();
+        loop {
+            match get_session_response(&connection, id)? {
+                SessionResponse::Complete(session) => return Ok(*session),
+                SessionResponse::Starting => {}
+            }
+            if started.elapsed() >= CREATE_SESSION_TIMEOUT {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("session {id} did not finish creation in time"),
+                ));
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    pub fn stop(&self, id: &str) -> io::Result<Session> {
+        self.lifecycle(id, "stop", DEFAULT_REQUEST_TIMEOUT, SessionState::Stopped)
+    }
+
+    pub fn start(&self, id: &str) -> io::Result<Session> {
+        self.lifecycle(id, "start", CREATE_SESSION_TIMEOUT, SessionState::Ready)
     }
 
     pub fn destroy(&self, id: &str) -> io::Result<()> {
@@ -300,24 +438,195 @@ impl SessionClient {
             Err(response_error(response)?)
         }
     }
+
+    fn lifecycle(
+        &self,
+        id: &str,
+        action: &str,
+        timeout: Duration,
+        expected: SessionState,
+    ) -> io::Result<Session> {
+        if !valid_session_id(id) {
+            return Err(invalid("session ID is invalid"));
+        }
+        let connection = Connection::open(&self.endpoint, &self.api_key, timeout)?;
+        let response = connection
+            .client
+            .post(format!("{}/v0/sessions/{id}/{action}", connection.base_url))
+            .bearer_auth(&connection.api_key)
+            .send()
+            .map_err(other)?;
+        let session: Session = decode(response)?;
+        validate_session(&session)?;
+        if session.session_id != id || session.state != expected {
+            return Err(invalid(
+                "endpoint returned an inconsistent lifecycle result",
+            ));
+        }
+        Ok(session)
+    }
+}
+
+fn create_contract_from_health(health: ApiHealthResponse) -> io::Result<CreateContract> {
+    match health.runtime {
+        Some(runtime) if is_runtime(&runtime) => Ok(CreateContract::ServerAssignedId { runtime }),
+        Some(_) => Err(invalid("endpoint returned an invalid runtime identifier")),
+        None => Ok(CreateContract::CallerAssignedId),
+    }
+}
+
+fn encode_create_request(
+    contract: &CreateContract,
+    id: &str,
+    client_public_key: &str,
+) -> io::Result<Vec<u8>> {
+    match contract {
+        CreateContract::CallerAssignedId => serde_json::to_vec(&ApiCreateSessionRequest {
+            session_id: id,
+            client_public_key,
+        }),
+        CreateContract::ServerAssignedId { runtime } => {
+            serde_json::to_vec(&ApiRuntimeCreateSessionRequest {
+                runtime,
+                client_public_key,
+            })
+        }
+    }
+    .map_err(other)
+}
+
+fn get_session_response(connection: &Connection, id: &str) -> io::Result<SessionResponse> {
+    let response = connection
+        .client
+        .get(format!("{}/v0/sessions/{id}", connection.base_url))
+        .bearer_auth(&connection.api_key)
+        .send()
+        .map_err(other)?;
+    decode_session_response(response, Some(id))
+}
+
+fn decode_session_response(
+    response: Response,
+    expected_id: Option<&str>,
+) -> io::Result<SessionResponse> {
+    if response.status() == StatusCode::ACCEPTED {
+        let Some(expected_id) = expected_id else {
+            return Err(invalid(
+                "runtime-selected endpoint returned an asynchronous creation response",
+            ));
+        };
+        let accepted: ApiCreateSessionAccepted = decode(response)?;
+        if accepted.session_id != expected_id || accepted.state != SessionState::Starting {
+            return Err(invalid(
+                "endpoint returned an inconsistent starting session",
+            ));
+        }
+        return Ok(SessionResponse::Starting);
+    }
+    let session: Session = decode(response)?;
+    validate_session(&session)?;
+    if expected_id.is_some_and(|id| session.session_id != id) {
+        return Err(invalid("endpoint returned a different session ID"));
+    }
+    Ok(SessionResponse::Complete(Box::new(session)))
 }
 
 fn validate_session(session: &Session) -> io::Result<()> {
+    let system_files_consistent = match (
+        &session.system_files_volume_id,
+        session.system_files_ready_ns,
+    ) {
+        (Some(id), Some(ready)) => {
+            valid_session_id(id)
+                && ready >= session.guest_ready_ns
+                && session.storage_ready_ns >= ready
+        }
+        (None, None) => session.storage_ready_ns >= session.guest_ready_ns,
+        _ => false,
+    };
+    let protocol_consistent = match session.runtime.as_deref() {
+        Some(runtime) => {
+            is_runtime(runtime)
+                && session.system_files_volume_id.is_none()
+                && session.system_files_ready_ns.is_none()
+                && session.volume_create_ns.is_none()
+                && detailed_timings_absent(session)
+        }
+        None => detailed_timings_consistent(session),
+    };
     if !valid_session_id(&session.session_id)
-        || !is_runtime(&session.runtime)
+        || session.generation == 0
         || !is_sha256(&session.template_id)
         || !is_sha256(&session.core_sha256)
+        || !valid_session_id(&session.volume_id)
+        || session.workspace_path != "/workspace"
         || !session.guest_ipv4.is_private()
         || session.ssh_port != 22
         || session.ssh_username != "jio"
         || !valid_ssh_public_key(&session.ssh_host_public_key)
         || session.guest_ready_ns == 0
-        || session.network_ready_ns < session.guest_ready_ns
+        || !system_files_consistent
+        || !protocol_consistent
+        || session.network_ready_ns < session.storage_ready_ns
         || session.ssh_ready_ns < session.network_ready_ns
     {
         return Err(invalid("endpoint returned inconsistent session metadata"));
     }
     Ok(())
+}
+
+fn detailed_timings_absent(session: &Session) -> bool {
+    session.storage_attach_ns.is_none()
+        && session.worker_spawn_ns.is_none()
+        && session.worker_template_prepare_ns.is_none()
+        && session.cow_fork_ns.is_none()
+        && session.vm_create_ns.is_none()
+        && session.state_restore_ns.is_none()
+        && session.device_restore_ns.is_none()
+        && session.vsock_transport_reset_ns.is_none()
+        && session.vsock_connect_ns.is_none()
+        && session.vsock_init_ns.is_none()
+        && session.access_probe_ns.is_none()
+        && session.worker_ready_ns.is_none()
+        && session.session_ready_ns.is_none()
+}
+
+fn detailed_timings_consistent(session: &Session) -> bool {
+    let (
+        Some(_storage_attach_ns),
+        Some(_worker_spawn_ns),
+        Some(_worker_template_prepare_ns),
+        Some(_cow_fork_ns),
+        Some(_vm_create_ns),
+        Some(_state_restore_ns),
+        Some(_device_restore_ns),
+        Some(_vsock_transport_reset_ns),
+        Some(_vsock_connect_ns),
+        Some(_vsock_init_ns),
+        Some(_access_probe_ns),
+        Some(worker_ready_ns),
+        Some(session_ready_ns),
+    ) = (
+        session.storage_attach_ns,
+        session.worker_spawn_ns,
+        session.worker_template_prepare_ns,
+        session.cow_fork_ns,
+        session.vm_create_ns,
+        session.state_restore_ns,
+        session.device_restore_ns,
+        session.vsock_transport_reset_ns,
+        session.vsock_connect_ns,
+        session.vsock_init_ns,
+        session.access_probe_ns,
+        session.worker_ready_ns,
+        session.session_ready_ns,
+    )
+    else {
+        return false;
+    };
+    worker_ready_ns >= session.ssh_ready_ns
+        && session_ready_ns >= worker_ready_ns
+        && (session.generation == 1) == session.volume_create_ns.is_some()
 }
 
 pub fn valid_session_id(value: &str) -> bool {
@@ -748,10 +1057,12 @@ fn other(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiRunResponse, ApiVmResult, RunRequest, SessionClient, normalize_endpoint,
-        valid_ssh_public_key, validate,
+        ApiHealthResponse, ApiRunResponse, ApiVmResult, CreateContract, RunRequest, Session,
+        SessionClient, SessionState, create_contract_from_health, encode_create_request,
+        normalize_endpoint, valid_ssh_public_key, validate, validate_session,
     };
     use std::io;
+    use std::net::Ipv4Addr;
 
     const API_KEY: &str = "0123456789abcdef0123456789abcdef";
 
@@ -810,6 +1121,55 @@ mod tests {
     #[test]
     fn rejects_concurrency_above_the_instance_count() {
         assert!(RunRequest::new("host", API_KEY, "native-elf-v0", "program", 5, 6).is_err());
+    }
+
+    #[test]
+    fn selects_the_create_contract_from_health_metadata() -> io::Result<()> {
+        let current: ApiHealthResponse = serde_json::from_str(r#"{"status":"experimental"}"#)?;
+        assert_eq!(
+            create_contract_from_health(current)?,
+            CreateContract::CallerAssignedId
+        );
+
+        let transitional: ApiHealthResponse =
+            serde_json::from_str(r#"{"status":"experimental","runtime":"python3.12-source-v0"}"#)?;
+        assert_eq!(
+            create_contract_from_health(transitional)?,
+            CreateContract::ServerAssignedId {
+                runtime: "python3.12-source-v0".into()
+            }
+        );
+
+        let invalid: ApiHealthResponse = serde_json::from_str(r#"{"runtime":"../python"}"#)?;
+        assert!(create_contract_from_health(invalid).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn encodes_each_supported_create_contract() -> io::Result<()> {
+        let id = "ab".repeat(16);
+        let key =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
+        let current: serde_json::Value = serde_json::from_slice(&encode_create_request(
+            &CreateContract::CallerAssignedId,
+            &id,
+            key,
+        )?)?;
+        assert_eq!(current["session_id"], id);
+        assert_eq!(current["client_public_key"], key);
+        assert!(current.get("runtime").is_none());
+
+        let transitional: serde_json::Value = serde_json::from_slice(&encode_create_request(
+            &CreateContract::ServerAssignedId {
+                runtime: "python3.12-source-v0".into(),
+            },
+            &id,
+            key,
+        )?)?;
+        assert_eq!(transitional["runtime"], "python3.12-source-v0");
+        assert_eq!(transitional["client_public_key"], key);
+        assert!(transitional.get("session_id").is_none());
+        Ok(())
     }
 
     #[test]
@@ -879,5 +1239,89 @@ mod tests {
         let mut malformed = key.as_bytes().to_vec();
         malformed[20] = b'!';
         assert!(!valid_ssh_public_key(&String::from_utf8_lossy(&malformed)));
+    }
+
+    #[test]
+    fn validates_the_persistent_session_contract() -> io::Result<()> {
+        let session = persistent_session();
+        validate_session(&session)?;
+
+        let mut mismatched = session.clone();
+        mismatched.system_files_ready_ns = None;
+        assert!(validate_session(&mismatched).is_err());
+
+        let mut restarted = session;
+        restarted.generation = 2;
+        restarted.volume_create_ns = None;
+        validate_session(&restarted)
+    }
+
+    #[test]
+    fn validates_the_transitional_session_contract_without_inventing_timings() -> io::Result<()> {
+        let session: Session = serde_json::from_value(serde_json::json!({
+            "session_id": "ab".repeat(16),
+            "state": "ready",
+            "generation": 1,
+            "runtime": "python3.12-source-v0",
+            "template_id": "c".repeat(64),
+            "core_sha256": "d".repeat(64),
+            "volume_id": "ef".repeat(16),
+            "workspace_path": "/workspace",
+            "guest_ipv4": "172.31.10.2",
+            "ssh_port": 22,
+            "ssh_username": "jio",
+            "ssh_host_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f",
+            "guest_ready_ns": 10,
+            "storage_ready_ns": 20,
+            "network_ready_ns": 30,
+            "ssh_ready_ns": 40
+        }))?;
+        validate_session(&session)?;
+        assert_eq!(session.runtime.as_deref(), Some("python3.12-source-v0"));
+        assert!(session.worker_ready_ns.is_none());
+
+        let mut mixed = session;
+        mixed.worker_ready_ns = Some(40);
+        assert!(validate_session(&mixed).is_err());
+        Ok(())
+    }
+
+    fn persistent_session() -> Session {
+        Session {
+            session_id: "ab".repeat(16),
+            state: SessionState::Ready,
+            generation: 1,
+            runtime: None,
+            template_id: "c".repeat(64),
+            core_sha256: "d".repeat(64),
+            volume_id: "ef".repeat(16),
+            system_files_volume_id: Some("12".repeat(16)),
+            workspace_path: "/workspace".into(),
+            guest_ipv4: Ipv4Addr::new(172, 31, 10, 2),
+            ssh_port: 22,
+            ssh_username: "jio".into(),
+            ssh_host_public_key:
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f"
+                    .into(),
+            volume_create_ns: Some(1),
+            storage_attach_ns: Some(1),
+            worker_spawn_ns: Some(1),
+            worker_template_prepare_ns: Some(1),
+            cow_fork_ns: Some(1),
+            vm_create_ns: Some(1),
+            state_restore_ns: Some(1),
+            device_restore_ns: Some(1),
+            vsock_transport_reset_ns: Some(1),
+            vsock_connect_ns: Some(2),
+            vsock_init_ns: Some(3),
+            guest_ready_ns: 10,
+            system_files_ready_ns: Some(20),
+            storage_ready_ns: 30,
+            network_ready_ns: 40,
+            ssh_ready_ns: 50,
+            access_probe_ns: Some(1),
+            worker_ready_ns: Some(60),
+            session_ready_ns: Some(70),
+        }
     }
 }

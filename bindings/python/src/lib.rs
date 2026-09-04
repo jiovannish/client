@@ -44,14 +44,10 @@ impl PyJio {
         self.inner.endpoint()
     }
 
-    #[pyo3(signature = (runtime=None))]
-    fn create(&self, py: Python<'_>, runtime: Option<String>) -> PyResult<PyVm> {
+    fn create(&self, py: Python<'_>) -> PyResult<PyVm> {
         let client = self.inner.clone();
         let created = py
-            .detach(move || match runtime {
-                Some(runtime) => client.create(&runtime),
-                None => client.create_default(),
-            })
+            .detach(move || client.create())
             .map_err(to_python_error)?;
         Ok(PyVm { inner: created })
     }
@@ -74,6 +70,20 @@ impl PyJio {
             .map_err(to_python_error)
     }
 
+    fn stop(&self, py: Python<'_>, session_id: String) -> PyResult<PySession> {
+        let client = self.inner.clone();
+        py.detach(move || client.stop(&session_id))
+            .map(|session| PySession::from(&session))
+            .map_err(to_python_error)
+    }
+
+    fn start(&self, py: Python<'_>, session_id: String) -> PyResult<PySession> {
+        let client = self.inner.clone();
+        py.detach(move || client.start(&session_id))
+            .map(|session| PySession::from(&session))
+            .map_err(to_python_error)
+    }
+
     fn destroy(&self, py: Python<'_>, session_id: String) -> PyResult<()> {
         let client = self.inner.clone();
         py.detach(move || client.destroy(&session_id))
@@ -93,13 +103,13 @@ struct PyVm {
 #[pymethods]
 impl PyVm {
     #[getter]
-    fn id(&self) -> &str {
-        &self.inner.session().session_id
+    fn id(&self) -> String {
+        self.inner.session().session_id
     }
 
     #[getter]
     fn session(&self) -> PySession {
-        PySession::from(self.inner.session())
+        PySession::from(&self.inner.session())
     }
 
     fn refresh(&self, py: Python<'_>) -> PyResult<PySession> {
@@ -155,6 +165,20 @@ impl PyVm {
         Ok(PyBytes::new(py, &contents))
     }
 
+    fn stop(&self, py: Python<'_>) -> PyResult<PySession> {
+        let vm = self.inner.clone();
+        py.detach(move || vm.stop())
+            .map(|session| PySession::from(&session))
+            .map_err(to_python_error)
+    }
+
+    fn start(&self, py: Python<'_>) -> PyResult<PySession> {
+        let vm = self.inner.clone();
+        py.detach(move || vm.start())
+            .map(|session| PySession::from(&session))
+            .map_err(to_python_error)
+    }
+
     fn destroy(&self, py: Python<'_>) -> PyResult<()> {
         let vm = self.inner.clone();
         py.detach(move || vm.destroy()).map_err(to_python_error)
@@ -170,16 +194,36 @@ impl PyVm {
 struct PySession {
     session_id: String,
     state: String,
-    runtime: String,
+    generation: u64,
+    runtime: Option<String>,
     template_id: String,
     core_sha256: String,
+    volume_id: String,
+    system_files_volume_id: Option<String>,
+    workspace_path: String,
     guest_ipv4: String,
     ssh_port: u16,
     ssh_username: String,
     ssh_host_public_key: String,
+    volume_create_ns: Option<u64>,
+    storage_attach_ns: Option<u64>,
+    worker_spawn_ns: Option<u64>,
+    worker_template_prepare_ns: Option<u64>,
+    cow_fork_ns: Option<u64>,
+    vm_create_ns: Option<u64>,
+    state_restore_ns: Option<u64>,
+    device_restore_ns: Option<u64>,
+    vsock_transport_reset_ns: Option<u64>,
+    vsock_connect_ns: Option<u64>,
+    vsock_init_ns: Option<u64>,
     guest_ready_ns: u64,
+    system_files_ready_ns: Option<u64>,
+    storage_ready_ns: u64,
     network_ready_ns: u64,
     ssh_ready_ns: u64,
+    access_probe_ns: Option<u64>,
+    worker_ready_ns: Option<u64>,
+    session_ready_ns: Option<u64>,
 }
 
 impl From<&Session> for PySession {
@@ -187,16 +231,36 @@ impl From<&Session> for PySession {
         Self {
             session_id: session.session_id.clone(),
             state: state_name(session.state).into(),
+            generation: session.generation,
             runtime: session.runtime.clone(),
             template_id: session.template_id.clone(),
             core_sha256: session.core_sha256.clone(),
+            volume_id: session.volume_id.clone(),
+            system_files_volume_id: session.system_files_volume_id.clone(),
+            workspace_path: session.workspace_path.clone(),
             guest_ipv4: session.guest_ipv4.to_string(),
             ssh_port: session.ssh_port,
             ssh_username: session.ssh_username.clone(),
             ssh_host_public_key: session.ssh_host_public_key.clone(),
+            volume_create_ns: session.volume_create_ns,
+            storage_attach_ns: session.storage_attach_ns,
+            worker_spawn_ns: session.worker_spawn_ns,
+            worker_template_prepare_ns: session.worker_template_prepare_ns,
+            cow_fork_ns: session.cow_fork_ns,
+            vm_create_ns: session.vm_create_ns,
+            state_restore_ns: session.state_restore_ns,
+            device_restore_ns: session.device_restore_ns,
+            vsock_transport_reset_ns: session.vsock_transport_reset_ns,
+            vsock_connect_ns: session.vsock_connect_ns,
+            vsock_init_ns: session.vsock_init_ns,
             guest_ready_ns: session.guest_ready_ns,
+            system_files_ready_ns: session.system_files_ready_ns,
+            storage_ready_ns: session.storage_ready_ns,
             network_ready_ns: session.network_ready_ns,
             ssh_ready_ns: session.ssh_ready_ns,
+            access_probe_ns: session.access_probe_ns,
+            worker_ready_ns: session.worker_ready_ns,
+            session_ready_ns: session.session_ready_ns,
         }
     }
 }
@@ -205,8 +269,8 @@ impl From<&Session> for PySession {
 impl PySession {
     fn __repr__(&self) -> String {
         format!(
-            "Session(session_id={:?}, state={:?}, runtime={:?})",
-            self.session_id, self.state, self.runtime
+            "Session(session_id={:?}, state={:?}, generation={})",
+            self.session_id, self.state, self.generation
         )
     }
 }
@@ -283,7 +347,10 @@ impl PyCommandResult {
 
 fn state_name(state: SessionState) -> &'static str {
     match state {
+        SessionState::Starting => "starting",
         SessionState::Ready => "ready",
+        SessionState::Stopping => "stopping",
+        SessionState::Stopped => "stopped",
         SessionState::Failed => "failed",
         SessionState::Destroyed => "destroyed",
     }
