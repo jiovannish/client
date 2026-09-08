@@ -14,5 +14,5 @@ Security fixes target the latest release. Upgrade before checking whether a
 previously reported issue is resolved. There is no long-term support commitment
 for older experimental releases.
 
-Jio assumes a trusted host operator. See [current limitations](doc/limitations.md)
+Jio assumes a trusted host operator. See [current limitations](docs/limitations.md)
 for the execution and session boundaries.

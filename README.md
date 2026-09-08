@@ -2,7 +2,7 @@
 
 Create and connect to microVMs from your terminal.
 
-[Documentation](doc/README.md) · [Releases](https://github.com/jiovannish/client/releases) · [Contributing](CONTRIBUTING.md)
+[Documentation](docs/README.md) · [Releases](https://github.com/jiovannish/client/releases) · [Contributing](CONTRIBUTING.md)
 
 ## Getting started
 
@@ -21,15 +21,15 @@ jio connect
 ```
 
 Installs to `~/.local/bin`; add it to your `PATH` if needed. Requires OpenSSH.
-See [installation](doc/README.md#installation) for supported platforms and updates.
+See [installation](docs/README.md#installation) for supported platforms and updates.
 
 ## Documentation
 
-Read the [CLI guide](doc/README.md) for commands, configuration, and examples.
+Read the [CLI guide](docs/README.md) for commands, configuration, and examples.
 [Node.js](bindings/node/README.md) and [Python](bindings/python/README.md) SDKs
 are available to build from source.
 
-Jio is experimental. See [current limitations](doc/limitations.md).
+Jio is experimental. See [current limitations](docs/limitations.md).
 
 ## Contributing
 
