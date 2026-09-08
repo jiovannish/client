@@ -18,17 +18,28 @@ send command input, read and write bounded files, stop it cleanly, start the
 same files as a new VM generation, inspect or reattach it, and explicitly
 destroy it.
 
-Set your Jio API key. The connection and public TLS certificate are built in:
+Log in once with your Jio API key. The connection and public TLS certificate are built in:
 
 ```sh
-export JIO_API_KEY='replace-with-a-32-byte-or-longer-key'
+jio login '<your-api-key>'
 jio usage
 jio create
 ```
 
+Login verifies the key before saving it with owner-only permissions in
+`~/.jio/credentials` (or `$JIO_STATE_DIR/credentials`). Later CLI commands use
+that key automatically. `JIO_API_KEY` takes precedence when set; SDKs still use
+an explicit key or that environment variable. Login leaves your size preference
+and VM credentials intact. Keys passed as arguments may remain in shell history.
+
+Use `jio login '<your-api-key>' --host <endpoint>` for a custom server; pass that
+same endpoint on later commands. The saved key is never sent to a different
+endpoint. An invalid key or failed verification leaves the previous login intact.
+
 No address or certificate path is needed. TLS and guest SSH identity verification
-remain enabled. A fresh CLI selects Large (4 vCPU / 8 GiB), the currently available
-size. Existing choices are preserved; change them with `jio config` if needed.
+remain enabled. A fresh CLI selects Medium (2 vCPU / 4 GiB). Existing choices
+are preserved; change them with `jio config` if needed. The service must advertise
+the selected size; the client does not silently create a different-sized VM.
 
 For development, explicit connection options and `JIO_ENDPOINT` (or its legacy
 alias `JIO_HOST`) still override the default. `JIO_CA_CERT` can supply a custom
@@ -103,7 +114,7 @@ The current implementation uses the same SSH transport as the SDK; the command
 interface does not depend on that transport remaining SSH.
 
 ```sh
-export JIO_API_KEY='replace-with-a-32-byte-or-longer-key'
+jio login '<your-api-key>'
 
 jio usage
 session="$(cargo run --quiet --release -p jio-cli -- create)"
@@ -142,15 +153,14 @@ in `~/.jio/config` (or `$JIO_STATE_DIR/config`) and is used by later
 
 | Size | vCPUs | RAM |
 | --- | ---: | ---: |
-| Small | 1 | 512 MiB |
+| Small | 1 | 2 GiB |
 | Medium | 2 | 4 GiB |
 | Large | 4 | 8 GiB |
-| X-Large | 8 | 16 GiB |
 
-The client sends a size only when Core advertises a compatible size catalog in
-its health response. Small remains compatible with existing fixed-template
-endpoints; selecting another size against one of those endpoints fails before
-session creation instead of sending it an unknown request field.
+The client sends a size only when the endpoint advertises it in its health
+response. An unavailable size fails before creation; it never silently uses a
+different template. Old fixed-template endpoints do not advertise their memory
+size and cannot satisfy an explicit size request.
 
 When run from a terminal, `jio create` asks whether to enter the VM immediately.
 When its output is redirected, it prints only the session ID for scripts.
@@ -187,7 +197,7 @@ the user's default Codex profile.
 ## Explicit limitations
 
 - Standalone Core currently admits one operator-selected template. The CLI can
-  persist a preferred size, but non-Small creation requires an endpoint that
+  persist a preferred size, but explicit size selection requires an endpoint that
   advertises per-session size selection. Clients do not select a language
   runtime per session or assume one exists in the guest.
 - Clean stop/start preserves the workspace and the configured ordinary system

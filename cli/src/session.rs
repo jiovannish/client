@@ -38,15 +38,13 @@ const INSTALL_CODEX_AUTH: &str = concat!(
 );
 
 pub fn usage(host: String) -> io::Result<()> {
-    let api_key = env::var("JIO_API_KEY")
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "JIO_API_KEY is required"))?;
+    let api_key = crate::config::api_key(&host)?;
     let usage = jio_client::SessionClient::new(host, api_key)?.usage()?;
     print_usage(&mut io::stdout().lock(), &usage)
 }
 
 pub fn list(host: String) -> io::Result<()> {
-    let api_key = env::var("JIO_API_KEY")
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "JIO_API_KEY is required"))?;
+    let api_key = crate::config::api_key(&host)?;
     let vms = jio_client::SessionClient::new(host, api_key)?.list()?;
     let mut output = io::stdout().lock();
     print_vms(&mut output, &vms)
@@ -222,8 +220,7 @@ pub fn start(host: String, id: &str) -> io::Result<Session> {
 }
 
 fn client(host: String) -> io::Result<VmClient> {
-    let api_key = env::var("JIO_API_KEY")
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "JIO_API_KEY is required"))?;
+    let api_key = crate::config::api_key(&host)?;
     VmClient::new(host, api_key)
 }
 

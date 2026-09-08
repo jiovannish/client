@@ -26,7 +26,8 @@ const USAGE: &str = concat!(
     "  stop      <session-id> [options]                 Stop compute and retain files\n",
     "  start     <session-id> [options]                 Start with retained files\n",
     "  destroy   [session-id] [options]                 Delete the VM and retained files\n",
-    "  login     <agent> [session-id] [options]         Use local agent login in a VM\n",
+    "  login     <api-key> [options]                    Save your Jio API key\n",
+    "  login     codex [session-id] [options]           Use local Codex login in a VM\n",
     "  yolo      <agent> [session-id] [options]         Open an agent with full VM access\n",
     "  completion <shell>                               Print shell completion setup\n",
     "  --version                                        Print the installed version",
@@ -105,7 +106,11 @@ const DESTROY_USAGE: &str = concat!(
 );
 
 const LOGIN_USAGE: &str = concat!(
-    "usage: jio login <agent> [session-id] [options]\n",
+    "usage: jio login <api-key> [--host <host>]\n",
+    "       jio login codex [session-id] [options]\n",
+    "\n",
+    "Verify and save your Jio API key for later CLI commands.\n",
+    "JIO_API_KEY overrides the saved login.\n",
     "\n",
     "  Agent     Arguments\n",
     "  codex     [session-id] [options]                 Use local Codex login in a VM\n",
@@ -271,6 +276,10 @@ enum Invocation {
         host: String,
         id: String,
     },
+    Login {
+        host: String,
+        api_key: String,
+    },
     LoginCodex {
         host: String,
         id: Option<String>,
@@ -353,6 +362,7 @@ fn execute(invocation: Invocation) -> io::Result<()> {
             );
             Ok(())
         }
+        Invocation::Login { host, api_key } => config::login(&host, &api_key),
         Invocation::LoginCodex { host, id } => {
             let (id, status) = session::codex_login(host, id.as_deref())?;
             io::stdout().write_all(&status.stdout)?;
@@ -482,15 +492,28 @@ fn options_from(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
             session_options(arguments, SessionAction::Start)
         }
         Some(command) if command == OsStr::new("destroy") => destroy_options(arguments),
-        Some(command) if command == OsStr::new("login") => {
-            agent_options(arguments, AgentAction::Login)
-        }
+        Some(command) if command == OsStr::new("login") => login_options(arguments),
         Some(command) if command == OsStr::new("yolo") => {
             agent_options(arguments, AgentAction::Yolo)
         }
         Some(command) if command == OsStr::new("completion") => completion_options(arguments),
         _ => Err(usage(USAGE)),
     }
+}
+
+fn login_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invocation> {
+    let first = arguments.next();
+    if first.as_deref().is_some_and(is_help) {
+        return Ok(Invocation::Help(LOGIN_USAGE));
+    }
+    if first.as_deref() == Some(OsStr::new("codex")) {
+        return agent_session_options(arguments, AgentAction::Login);
+    }
+    let api_key = text(first, "API key", LOGIN_USAGE)?;
+    host_options(arguments, LOGIN_USAGE, |host| Invocation::Login {
+        host,
+        api_key,
+    })
 }
 
 fn config_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invocation> {
@@ -732,7 +755,7 @@ fn exec_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
 fn host_options(
     mut arguments: impl Iterator<Item = OsString>,
     help: &'static str,
-    invocation: fn(String) -> Invocation,
+    invocation: impl FnOnce(String) -> Invocation,
 ) -> io::Result<Invocation> {
     let mut host = None;
     while let Some(argument) = arguments.next() {

@@ -62,9 +62,9 @@ pub fn resolve_endpoint(explicit: Option<String>) -> io::Result<String> {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum VmSize {
     #[serde(rename = "small")]
-    #[default]
     Small,
     #[serde(rename = "medium")]
+    #[default]
     Medium,
     #[serde(rename = "large")]
     Large,
@@ -104,7 +104,7 @@ impl VmSize {
 
     pub const fn memory_mib(self) -> u32 {
         match self {
-            Self::Small => 512,
+            Self::Small => 2 * 1024,
             Self::Medium => 4 * 1024,
             Self::Large => 8 * 1024,
             Self::XLarge => 16 * 1024,
@@ -386,10 +386,10 @@ impl CreateContract {
             return Ok(None);
         };
         let Self::CallerAssignedId { sizes } = self else {
-            return legacy_size(requested);
+            return legacy_size();
         };
         let Some(sizes) = sizes else {
-            return legacy_size(requested);
+            return legacy_size();
         };
         if sizes.contains(&requested) {
             Ok(Some(requested))
@@ -405,15 +405,12 @@ impl CreateContract {
     }
 }
 
-fn legacy_size(requested: VmSize) -> io::Result<Option<VmSize>> {
-    if requested == VmSize::Small {
-        Ok(None)
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "the endpoint does not support selectable VM sizes; run `jio config` and choose Small",
-        ))
-    }
+fn legacy_size() -> io::Result<Option<VmSize>> {
+    // An older fixed template may have only 512 MiB; never call that Small (2 GiB).
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "the endpoint does not advertise selectable VM sizes; use a size-aware endpoint",
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1615,7 +1612,8 @@ mod tests {
     #[test]
     fn gates_size_selection_on_endpoint_capabilities() -> io::Result<()> {
         let legacy = CreateContract::CallerAssignedId { sizes: None };
-        assert_eq!(legacy.request_size(Some(VmSize::Small))?, None);
+        assert_eq!(legacy.request_size(None)?, None);
+        assert!(legacy.request_size(Some(VmSize::Small)).is_err());
         assert!(legacy.request_size(Some(VmSize::Medium)).is_err());
 
         let sized = CreateContract::CallerAssignedId {

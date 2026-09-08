@@ -71,8 +71,7 @@ fn execute(
 ) -> io::Result<()> {
     let program = temporary.join("program");
     let inline = temporary.join("source.py");
-    let api_key = env::var("JIO_API_KEY")
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "JIO_API_KEY is required"))?;
+    let api_key = crate::config::api_key(host)?;
     let (workload, runtime) = match source {
         Source::File(source) if source.extension().is_some_and(|value| value == "rs") => {
             send(

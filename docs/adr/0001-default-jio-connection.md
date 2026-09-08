@@ -18,7 +18,6 @@ It was verified against the existing deployed Jio certificate chain. Rotating
 this CA or the default address requires a client update; no automatic discovery
 or global OS trust-store installation is introduced.
 
-Fresh CLI configuration selects Large, the currently available 4-vCPU/8-GiB
-profile. Existing saved selections are preserved. This does not resize VMs or
-deploy the separately proposed 2-vCPU/4-GiB profile. Custom connections can still
-select their supported size with `jio config`.
+Fresh CLI configuration selects Medium (2 vCPU / 4 GiB). Existing saved
+selections are preserved; change them with `jio config`. An unavailable selected
+size fails before creation instead of silently choosing another template.

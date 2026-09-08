@@ -13,7 +13,10 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CONFIG_FILE: &str = "config";
+const CREDENTIALS_FILE: &str = "credentials";
+const MAX_CREDENTIAL_BYTES: u64 = 4096;
 const MAX_CONFIG_BYTES: u64 = 128;
+const SIZES: [VmSize; 3] = [VmSize::Small, VmSize::Medium, VmSize::Large];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Config {
@@ -23,13 +26,56 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            size: VmSize::Large,
+            size: VmSize::Medium,
         }
     }
 }
 
 pub fn load() -> io::Result<Config> {
     ConfigStore::discover()?.load()
+}
+
+pub fn login(host: &str, api_key: &str) -> io::Result<()> {
+    let client = jio_client::SessionClient::new(host, api_key)?;
+    if client.endpoint().contains(['\n', '\r']) {
+        return Err(invalid_input("Jio endpoint must not contain line endings"));
+    }
+    let contents = format!("{}\n{api_key}\n", client.endpoint());
+    if contents.len() as u64 > MAX_CREDENTIAL_BYTES {
+        return Err(invalid_input("Jio credentials are too large"));
+    }
+    let usage = client.usage()?;
+    ConfigStore::discover()?.write(CREDENTIALS_FILE, contents.as_bytes())?;
+    println!("Logged in to Jio as {}.", usage.account_id);
+    if env::var_os("JIO_API_KEY").is_some() {
+        println!("JIO_API_KEY is set and overrides this saved login; unset it to use this key.");
+    }
+    Ok(())
+}
+
+pub fn api_key(host: &str) -> io::Result<String> {
+    match env::var("JIO_API_KEY") {
+        Ok(key) => Ok(key),
+        Err(env::VarError::NotUnicode(_)) => Err(invalid_input("JIO_API_KEY is not UTF-8")),
+        Err(env::VarError::NotPresent) => {
+            let contents = ConfigStore::discover()?
+                .read(CREDENTIALS_FILE, MAX_CREDENTIAL_BYTES)?
+                .ok_or_else(|| {
+                    invalid_input("not logged in; run jio login <api-key> or set JIO_API_KEY")
+                })?;
+            let (endpoint, key) = contents
+                .strip_suffix('\n')
+                .and_then(|value| value.split_once('\n'))
+                .ok_or_else(|| invalid_data("invalid saved Jio credentials"))?;
+            let client = jio_client::SessionClient::new(endpoint, key)?;
+            if client.endpoint() != host {
+                return Err(invalid_input(
+                    "saved login belongs to a different endpoint; run jio login <api-key> --host <host> or set JIO_API_KEY",
+                ));
+            }
+            Ok(key.to_owned())
+        }
+    }
 }
 
 pub fn run() -> io::Result<()> {
@@ -123,18 +169,15 @@ impl ConfigApp {
             },
             View::Sizes => match code {
                 KeyCode::Up => {
-                    self.highlighted = self
-                        .highlighted
-                        .checked_sub(1)
-                        .unwrap_or(VmSize::ALL.len() - 1);
+                    self.highlighted = self.highlighted.checked_sub(1).unwrap_or(SIZES.len() - 1);
                     Action::Stay
                 }
                 KeyCode::Down => {
-                    self.highlighted = (self.highlighted + 1) % VmSize::ALL.len();
+                    self.highlighted = (self.highlighted + 1) % SIZES.len();
                     Action::Stay
                 }
                 KeyCode::Enter => {
-                    let size = VmSize::ALL[self.highlighted];
+                    let size = SIZES[self.highlighted];
                     self.view = View::Settings;
                     Action::Save(size)
                 }
@@ -192,13 +235,13 @@ impl ConfigApp {
     fn draw_sizes(&self, frame: &mut Frame, area: Rect) {
         let rows = Layout::vertical([
             Constraint::Length(1),
-            Constraint::Min(VmSize::ALL.len() as u16),
+            Constraint::Min(SIZES.len() as u16),
             Constraint::Length(1),
         ])
         .split(area);
         frame.render_widget(Paragraph::new("Size").style(Style::new().bold()), rows[0]);
 
-        let items = VmSize::ALL.into_iter().map(|size| {
+        let items = SIZES.into_iter().map(|size| {
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{:<10}", size.label()), Style::new().bold()),
                 Span::styled(size_detail(size), Style::new().dark_gray()),
@@ -218,7 +261,7 @@ impl ConfigApp {
 }
 
 fn size_index(size: VmSize) -> usize {
-    VmSize::ALL
+    SIZES
         .iter()
         .position(|candidate| *candidate == size)
         .unwrap_or_default()
@@ -256,12 +299,12 @@ impl ConfigStore {
         Self { root: root.into() }
     }
 
-    fn load(&self) -> io::Result<Config> {
+    fn read(&self, name: &str, max_bytes: u64) -> io::Result<Option<String>> {
         create_private_directory(&self.root)?;
-        let path = self.root.join(CONFIG_FILE);
+        let path = self.root.join(name);
         match fs::symlink_metadata(&path) {
             Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Config::default()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         }
         require_private_file(&path)?;
@@ -269,14 +312,20 @@ impl ConfigStore {
         let file = File::open(&path)?;
         let opened = file.metadata()?;
         if opened.dev() != expected.dev() || opened.ino() != expected.ino() {
-            return Err(invalid_data("local Jio config changed while it was opened"));
+            return Err(invalid_data("local Jio file changed while it was opened"));
         }
         let mut bytes = Vec::new();
-        file.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_CONFIG_BYTES {
-            return Err(invalid_data("local Jio config is too large"));
+        file.take(max_bytes + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(invalid_data("local Jio file is too large"));
         }
-        let contents = String::from_utf8(bytes).map_err(invalid_data)?;
+        String::from_utf8(bytes).map(Some).map_err(invalid_data)
+    }
+
+    fn load(&self) -> io::Result<Config> {
+        let Some(contents) = self.read(CONFIG_FILE, MAX_CONFIG_BYTES)? else {
+            return Ok(Config::default());
+        };
         let line = contents.strip_suffix('\n').unwrap_or(&contents);
         if line.contains(['\n', '\r']) {
             return Err(invalid_data("local Jio config has invalid line endings"));
@@ -290,15 +339,21 @@ impl ConfigStore {
     }
 
     fn save(&self, config: Config) -> io::Result<()> {
+        self.write(
+            CONFIG_FILE,
+            format!("size={}\n", config.size.id()).as_bytes(),
+        )
+    }
+
+    fn write(&self, name: &str, contents: &[u8]) -> io::Result<()> {
         create_private_directory(&self.root)?;
-        let target = self.root.join(CONFIG_FILE);
+        let target = self.root.join(name);
         match fs::symlink_metadata(&target) {
             Ok(_) => require_private_file(&target)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        let contents = format!("size={}\n", config.size.id());
-        replace_private_file(&self.root, &target, contents.as_bytes())
+        replace_private_file(&self.root, &target, contents)
     }
 }
 
@@ -424,11 +479,11 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_large_and_round_trips_each_size_privately() -> io::Result<()> {
+    fn defaults_to_medium_and_round_trips_each_size_privately() -> io::Result<()> {
         let directory = TestDirectory::new()?;
         let store = ConfigStore::at(directory.path());
         assert_eq!(store.load()?, Config::default());
-        assert_eq!(store.load()?.size, VmSize::Large);
+        assert_eq!(store.load()?.size, VmSize::Medium);
         for size in VmSize::ALL {
             store.save(Config { size })?;
             assert_eq!(store.load()?.size, size);
@@ -499,7 +554,7 @@ mod tests {
 
     #[test]
     fn formats_the_fixed_resource_profiles() {
-        assert_eq!(size_detail(VmSize::Small), "1 vCPU · 512 MiB");
+        assert_eq!(size_detail(VmSize::Small), "1 vCPU · 2 GiB");
         assert_eq!(size_detail(VmSize::Medium), "2 vCPU · 4 GiB");
         assert_eq!(size_detail(VmSize::Large), "4 vCPU · 8 GiB");
         assert_eq!(size_detail(VmSize::XLarge), "8 vCPU · 16 GiB");
