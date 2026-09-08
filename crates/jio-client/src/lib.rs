@@ -588,10 +588,15 @@ impl SessionClient {
             return Err(invalid("session ID is invalid"));
         }
         let connection = Connection::open(&self.endpoint, &self.api_key, timeout)?;
+        let generation = self.get(id)?.generation;
+        let mut random = [0u8; 16];
+        File::open("/dev/urandom")?.read_exact(&mut random)?;
         let response = connection
             .client
             .post(format!("{}/v0/sessions/{id}/{action}", connection.base_url))
             .bearer_auth(&connection.api_key)
+            .header("if-match", generation)
+            .header("idempotency-key", format!("{:x}", Sha256::digest(random)))
             .send()
             .map_err(other)?;
         let session: Session = decode(response)?;
@@ -915,11 +920,15 @@ struct Connection {
 
 impl Connection {
     fn open(endpoint: &str, api_key: &str, timeout: Duration) -> io::Result<Self> {
-        let client = Client::builder()
+        let mut builder = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(5))
-            .timeout(timeout)
-            .build()
-            .map_err(other)?;
+            .timeout(timeout);
+        if let Some(ca) = custom_ca()? {
+            builder = builder.add_root_certificate(ca);
+        }
+        let client = builder.build().map_err(other)?;
         let (base_url, tunnel) = if is_url(endpoint) {
             (endpoint.trim_end_matches('/').to_owned(), None)
         } else {
@@ -989,6 +998,22 @@ impl Connection {
             .map_err(other)?;
         decode(response)
     }
+}
+
+fn custom_ca() -> io::Result<Option<reqwest::Certificate>> {
+    let Some(path) = env::var_os("JIO_CA_CERT") else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(invalid("CA file exceeds limit"));
+    }
+    reqwest::Certificate::from_pem(&bytes)
+        .map(Some)
+        .map_err(other)
 }
 
 struct Tunnel {

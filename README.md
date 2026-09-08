@@ -27,7 +27,13 @@ export JIO_ENDPOINT='ubuntu@jio-host'
 ```
 
 `JIO_HOST` remains a compatibility alias for `JIO_ENDPOINT`.
+`JIO_CA_CERT` can supply a custom public CA certificate for hosted HTTPS access.
 
+The CLI commands and SDK interfaces are unchanged. A hosted VM handle reuses one
+authenticated SSH connection for exec/file/terminal calls. Independent CLI
+invocations attach again. A disconnected handle fails without replaying commands;
+reattach explicitly. Revocation/expiry close access with a bounded periodic check,
+not instant revocation. Closing SSH does not destroy the VM.
 If create returns an uncertain error, local authority is retained under the
 session ID included in that error. Inspect/reattach or destroy that ID before
 creating another VM; a transport error does not establish that admission failed.
@@ -164,8 +170,6 @@ the user's default Codex profile.
   recovery of running services are not supported.
 - The current standalone transport requires OpenSSH (`ssh` and `ssh-keygen`) on
   a macOS or Linux client.
-- A hosted HTTPS endpoint cannot yet provide programmable SSH without an SSH
-  gateway.
 - A command timeout terminates the local SSH process; it is not a durable guest
   process-cancellation protocol.
 - The native API and SDKs are experimental and do not yet carry a compatibility

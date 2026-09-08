@@ -10,6 +10,7 @@ use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -34,6 +35,8 @@ const CONNECTION_READY_MARKER: &[u8] = b"\x1dJIO_SSH_READY_V1\x1d";
 const CONNECTION_READY_COMMAND: &str =
     "printf '\\035JIO_SSH_READY_V1\\035'; exec \"${SHELL:-/bin/sh}\" -l";
 const MAX_CONNECTION_PRELUDE_BYTES: usize = 64 * 1024;
+
+mod transport;
 
 #[derive(Clone, Copy)]
 enum TtyMode {
@@ -328,6 +331,7 @@ impl VmClient {
         Ok(Vm {
             owner: self.clone(),
             session: Arc::new(RwLock::new(session)),
+            transport: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -385,6 +389,7 @@ impl VmClient {
         Ok(Vm {
             owner: self.clone(),
             session: Arc::new(RwLock::new(session)),
+            transport: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -489,7 +494,20 @@ impl VmClient {
         credentials: &Credentials,
         tty_mode: TtyMode,
     ) -> io::Result<Command> {
-        if self.api.uses_http_endpoint() && !self.api.uses_local_http_endpoint() {
+        self.ssh_command_at(session, credentials, tty_mode, None)
+    }
+
+    fn ssh_command_at(
+        &self,
+        session: &Session,
+        credentials: &Credentials,
+        tty_mode: TtyMode,
+        transport: Option<(&Path, u16, bool)>,
+    ) -> io::Result<Command> {
+        if transport.is_none()
+            && self.api.uses_http_endpoint()
+            && !self.api.uses_local_http_endpoint()
+        {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "this experimental build has no load-balancer SSH gateway; use an SSH host endpoint",
@@ -497,10 +515,43 @@ impl VmClient {
         }
 
         let alias = format!("jio-{}", session.session_id);
-        let target = format!("{}@{}", session.ssh_username, session.guest_ipv4);
+        let target = format!(
+            "{}@{}",
+            session.ssh_username,
+            if transport.is_some() {
+                std::net::Ipv4Addr::LOCALHOST
+            } else {
+                session.guest_ipv4
+            }
+        );
         let mut known_hosts_option = OsString::from("UserKnownHostsFile=");
         known_hosts_option.push(&credentials.known_hosts);
         let mut command = Command::new("ssh");
+        if let Some((socket, _, master)) = transport {
+            command
+                .arg("-F")
+                .arg("/dev/null")
+                .arg("-S")
+                .arg(socket)
+                .arg("-o")
+                .arg(if master {
+                    "ControlMaster=yes"
+                } else {
+                    "ControlMaster=no"
+                });
+            if master {
+                command.arg("-N");
+            } else {
+                // Never silently fall back/replay a channel if the master died.
+                command.arg("-o").arg("ProxyCommand=false");
+            }
+        } else {
+            command
+                .arg("-o")
+                .arg("ControlMaster=no")
+                .arg("-o")
+                .arg("ControlPath=none");
+        }
         if !matches!(tty_mode, TtyMode::Disabled) {
             command.arg("-q");
         }
@@ -539,12 +590,12 @@ impl VmClient {
             .arg("PermitLocalCommand=no")
             .arg("-o")
             .arg("ConnectTimeout=10")
-            .arg("-o")
-            .arg("ControlMaster=no")
-            .arg("-o")
-            .arg("ControlPath=none")
             .arg("-p")
-            .arg(session.ssh_port.to_string());
+            .arg(
+                transport
+                    .map_or(session.ssh_port, |(_, port, _)| port)
+                    .to_string(),
+            );
         match tty_mode {
             TtyMode::Disabled => {
                 command.arg("-T");
@@ -554,7 +605,7 @@ impl VmClient {
                 command.arg("-t");
             }
         }
-        if !self.api.uses_local_http_endpoint() {
+        if transport.is_none() && !self.api.uses_local_http_endpoint() {
             command.arg("-J").arg(self.api.endpoint());
         }
         command.arg(target);
@@ -572,6 +623,7 @@ pub struct PreparedConnection {
     terminal: File,
     prelude: Vec<u8>,
     finished: bool,
+    _vm: Vm,
 }
 
 impl PreparedConnection {
@@ -600,9 +652,50 @@ impl Drop for PreparedConnection {
 pub struct Vm {
     owner: VmClient,
     session: Arc<RwLock<Session>>,
+    transport: Arc<Mutex<Option<transport::Gateway>>>,
 }
 
 impl Vm {
+    fn command(&self, tty: TtyMode) -> io::Result<Command> {
+        if !self.owner.api.uses_http_endpoint() || self.owner.api.uses_local_http_endpoint() {
+            let (session, credentials) = self.owner.ready_session(&self.id())?;
+            self.cache(session.clone());
+            return self.owner.ssh_command(&session, &credentials, tty);
+        }
+        let mut transport = self
+            .transport
+            .lock()
+            .map_err(|_| io::Error::other("SSH transport lock poisoned"))?;
+        if transport.is_none() {
+            let (session, credentials) = self.owner.ready_session(&self.id())?;
+            *transport = Some(transport::Gateway::open(
+                &self.owner,
+                &session,
+                &credentials,
+            )?);
+            self.cache(session);
+        }
+        let gateway = transport
+            .as_mut()
+            .ok_or_else(|| io::Error::other("missing SSH transport"))?;
+        gateway.check()?;
+        let session = self.cached_session();
+        let credentials = self.owner.credentials(&session)?;
+        self.owner.ssh_command_at(
+            &session,
+            &credentials,
+            tty,
+            Some((&gateway.socket, gateway.port, false)),
+        )
+    }
+
+    fn disconnect(&self) -> io::Result<()> {
+        self.transport
+            .lock()
+            .map_err(|_| io::Error::other("SSH transport lock poisoned"))?
+            .take();
+        Ok(())
+    }
     pub fn session(&self) -> Session {
         self.cached_session()
     }
@@ -632,11 +725,7 @@ impl Vm {
                 "command input exceeds {MAX_FILE_BYTES} bytes"
             )));
         }
-        let (session, credentials) = self.owner.ready_session(&self.id())?;
-        self.cache(session.clone());
-        let mut process = self
-            .owner
-            .ssh_command(&session, &credentials, TtyMode::Disabled)?;
+        let mut process = self.command(TtyMode::Disabled)?;
         process.arg(command);
         run_bounded(
             process,
@@ -667,11 +756,7 @@ impl Vm {
     pub fn read_file(&self, remote_path: &str, timeout: Duration) -> io::Result<Vec<u8>> {
         validate_remote_path(remote_path)?;
         validate_timeout(timeout)?;
-        let (session, credentials) = self.owner.ready_session(&self.id())?;
-        self.cache(session.clone());
-        let mut process = self
-            .owner
-            .ssh_command(&session, &credentials, TtyMode::Disabled)?;
+        let mut process = self.command(TtyMode::Disabled)?;
         process.arg(format!("cat -- {}", shell_quote(remote_path)));
         let result = run_bounded(process, None, timeout, MAX_FILE_BYTES)?;
         require_success("remote file read", &result)?;
@@ -689,11 +774,7 @@ impl Vm {
         if io::stdin().is_terminal() && io::stdout().is_terminal() && io::stderr().is_terminal() {
             return self.clone().prepare_connection()?.connect();
         }
-        let credentials = self.owner.credentials(&session)?;
-        let status = self
-            .owner
-            .ssh_command(&session, &credentials, TtyMode::Automatic)?
-            .status()?;
+        let status = self.command(TtyMode::Automatic)?.status()?;
         if status.success() {
             Ok(())
         } else {
@@ -704,13 +785,7 @@ impl Vm {
     /// Runs a command with inherited terminal I/O and a forced guest PTY.
     pub fn interactive_exec(&self, command: &str) -> io::Result<()> {
         validate_command(command)?;
-        let (session, credentials) = self.owner.ready_session(&self.id())?;
-        self.cache(session.clone());
-        let status = self
-            .owner
-            .ssh_command(&session, &credentials, TtyMode::Forced)?
-            .arg(command)
-            .status()?;
+        let status = self.command(TtyMode::Forced)?.arg(command).status()?;
         if status.success() {
             Ok(())
         } else {
@@ -722,6 +797,7 @@ impl Vm {
 
     pub fn destroy(&self) -> io::Result<()> {
         self.owner.destroy(&self.id())?;
+        self.disconnect()?;
         let mut destroyed = self.cached_session();
         destroyed.state = SessionState::Destroyed;
         self.cache(destroyed);
@@ -736,14 +812,11 @@ impl Vm {
                 session.session_id, session.state
             )));
         }
-        let credentials = self.owner.credentials(&session)?;
         let (mut terminal, guest_terminal) = pseudoterminal()?;
         mirror_window_size(&io::stdin(), &guest_terminal)?;
         let guest_input = guest_terminal.try_clone()?;
         let guest_output = guest_terminal.try_clone()?;
-        let mut command = self
-            .owner
-            .ssh_command(&session, &credentials, TtyMode::Forced)?;
+        let mut command = self.command(TtyMode::Forced)?;
         command
             .arg(CONNECTION_READY_COMMAND)
             .stdin(Stdio::from(guest_input))
@@ -762,17 +835,20 @@ impl Vm {
             terminal,
             prelude,
             finished: false,
+            _vm: self,
         })
     }
 
     pub fn stop(&self) -> io::Result<Session> {
         let stopped = self.owner.stop(&self.id())?;
+        self.disconnect()?;
         self.cache(stopped.clone());
         Ok(stopped)
     }
 
     pub fn start(&self) -> io::Result<Session> {
         let started = self.owner.start(&self.id())?;
+        self.disconnect()?;
         self.cache(started.clone());
         Ok(started)
     }
