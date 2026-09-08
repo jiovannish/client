@@ -26,7 +26,7 @@ try {
 ```
 
 The Jio connection and public TLS certificate are built in; only an API key is
-needed. Stop/start is unavailable for 30-minute friend sessions.
+needed. Hosted ephemeral sessions do not support stop/start.
 
 The current experimental transport supports macOS and Linux clients with
 OpenSSH installed. Standalone Core currently admits one operator-selected

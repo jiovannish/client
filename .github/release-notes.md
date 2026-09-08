@@ -30,3 +30,7 @@ Apache license and bundled dependency notices. Checksums detect corrupted
 downloads; they are not independent signatures of the publisher.
 
 The npm and Python SDKs remain source-build only in this release.
+
+## Documentation
+
+[CLI guide](https://github.com/jiovannish/client/blob/main/doc/README.md) · [Security](https://github.com/jiovannish/client/blob/main/SECURITY.md) · [Code of Conduct](https://github.com/jiovannish/client/blob/main/CODE_OF_CONDUCT.md)
