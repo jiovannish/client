@@ -1,6 +1,6 @@
 # Current limitations
 
-Jio v0.1.0 is experimental. The API and SDKs do not yet carry a compatibility
+Jio is experimental. The API and SDKs do not yet carry a compatibility
 promise, and this release is not a production-readiness claim.
 
 - VM data is visible to the host operator. KVM isolation does not provide
@@ -17,7 +17,7 @@ promise, and this release is not a production-readiness claim.
   account usage or listing. Explicit size selection requires a size-aware endpoint.
 - The legacy `jio run` artifact API is unavailable on the default hosted connection;
   use `jio create` and `jio exec`.
-- Node.js and Python SDKs must be built from source; v0.1.0 publishes CLI binaries
+- Node.js and Python SDKs must be built from source; GitHub releases publish CLI binaries
   only. SDKs accept an explicit API key or `JIO_API_KEY`, not the CLI's saved login.
 - Session access requires local VM credentials. An API key and VM ID alone do not
   let another client machine connect.

@@ -1,9 +1,11 @@
-First downloadable Jio CLI release, licensed under Apache-2.0.
+Fixes installation on Ubuntu when `~/.local/bin` is absent from the current
+shell's `PATH`. The installer selects `/usr/local/bin` when writable or available
+through passwordless sudo, so `jio` works immediately in Jio VMs. User-local and
+custom installation paths remain supported, with an explicit PATH command when
+needed. Updates the copyright notice to Saul Garcia Cespedes.
 
-Includes `jio login <api-key>`, hosted HTTPS access, saved VM sizes, account
-usage, VM listing and the persistent-session commands. New configurations default
-to Medium (2 vCPU / 4 GiB). This is an experimental client release, not a claim
-that the runtime is production-ready or protects VM data from its host operator.
+This remains an experimental CLI release. Account quotas, session lifetimes,
+and VM host trust requirements are unchanged.
 
 ## Install
 
