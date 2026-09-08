@@ -1,0 +1,88 @@
+name: CLI checks and releases
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      CARGO_TERM_COLOR: always
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Check and test the CLI
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked -p jio-cli -p jio-client --all-targets -- -D warnings
+          cargo test --locked -p jio-cli -p jio-client
+          RUSTDOCFLAGS='-D warnings' cargo doc --locked -p jio-cli -p jio-client --no-deps
+          node scripts/test-install.mjs
+      - name: Build and package the native binary
+        run: |
+          cargo build --locked --release -p jio-cli --target "$TARGET"
+          cargo install --locked cargo-bundle-licenses --version 4.2.0
+          node scripts/package-cli.mjs "$TARGET"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: jio-${{ matrix.target }}
+          path: target/dist/jio-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          pattern: jio-*
+          merge-multiple: true
+      - name: Create a draft for review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^    version=//p' install.sh)
+          test "$RELEASE_TAG" = "v$version"
+          cp install.sh dist/install.sh
+          cd dist
+          test "$(find . -name 'jio-*.tar.gz' | wc -l)" -eq 4
+          sha256sum jio-*.tar.gz install.sh > SHA256SUMS
+          gh release create "$RELEASE_TAG" --verify-tag --draft \
+            --title "Jio $RELEASE_TAG — experimental CLI" \
+            --notes-file ../.github/release-notes.md \
+            jio-*.tar.gz install.sh SHA256SUMS

@@ -11,6 +11,21 @@ This repository contains the supported ways to use Jio VMs:
 The language SDKs are native bindings to the Rust client. They do not duplicate
 Core's API contract or bypass its validation.
 
+## Install the CLI
+
+```sh
+curl -fsSL https://github.com/jiovannish/client/releases/latest/download/install.sh | sh
+```
+
+The installer downloads the native macOS or Linux binary, verifies its SHA-256
+checksum, and installs `jio` in `~/.local/bin`. Add that directory to your `PATH`
+if needed. No Rust, Node.js, or sudo is required. OpenSSH (`ssh` and `ssh-keygen`)
+is required to connect to VMs. Rerun the command to update; saved credentials and
+configuration are preserved.
+
+Binaries support macOS 11+ and Linux with glibc 2.35+, on ARM64 and x86-64.
+For a custom location, set `JIO_INSTALL_DIR` to an absolute path on the `sh` command.
+
 ## Current programmable workflow
 
 Today a developer can create a retained microVM, run bounded shell commands,
