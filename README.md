@@ -28,6 +28,10 @@ export JIO_ENDPOINT='ubuntu@jio-host'
 
 `JIO_HOST` remains a compatibility alias for `JIO_ENDPOINT`.
 
+If create returns an uncertain error, local authority is retained under the
+session ID included in that error. Inspect/reattach or destroy that ID before
+creating another VM; a transport error does not establish that admission failed.
+
 The client negotiates the current caller-assigned session-ID contract and the
 transitional runtime-selected contract exposed by earlier standalone Core
 builds. Transitional responses provide guest-, storage-, network-, and

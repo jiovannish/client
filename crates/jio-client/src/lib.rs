@@ -432,7 +432,8 @@ impl SessionClient {
             .bearer_auth(&connection.api_key)
             .send()
             .map_err(other)?;
-        if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+        if response.status() == StatusCode::NO_CONTENT || response.status() == StatusCode::NOT_FOUND
+        {
             Ok(())
         } else {
             Err(response_error(response)?)
@@ -1056,6 +1057,26 @@ fn other(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn queued_delete_is_not_completed_deletion() -> std::io::Result<()> {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut bytes = [0; 4096];
+            let _ = stream.read(&mut bytes)?;
+            stream.write_all(
+                b"HTTP/1.1 202 Accepted\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+        });
+        let client = super::SessionClient::new(endpoint, "a".repeat(64))?;
+        assert!(client.destroy(&"b".repeat(32)).is_err());
+        server
+            .join()
+            .map_err(|_| std::io::Error::other("test server failed"))??;
+        Ok(())
+    }
     use super::{
         ApiHealthResponse, ApiRunResponse, ApiVmResult, CreateContract, RunRequest, Session,
         SessionClient, SessionState, create_contract_from_health, encode_create_request,

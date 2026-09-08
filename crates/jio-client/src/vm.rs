@@ -176,7 +176,12 @@ impl VmClient {
         }
         let temporary = temporary_directory(&self.sessions)?;
         let result = self.create_inner(contract, &id, &temporary);
-        if result.is_err() {
+        let result = if contract.caller_assigns_id() {
+            result.map_err(|error| self.retain_failed_create(&id, &temporary, error))
+        } else {
+            result
+        };
+        if result.is_err() && !contract.caller_assigns_id() {
             let _ = remove_session_files(&temporary);
         }
         let vm = result?;
@@ -207,11 +212,40 @@ impl VmClient {
         }
         report(&id);
         let temporary = temporary_directory(&self.sessions)?;
-        let result = self.accept_create_inner(&contract, &id, &temporary);
-        if result.is_err() {
-            let _ = remove_session_files(&temporary);
+        self.accept_create_inner(&contract, &id, &temporary)
+            .map_err(|error| self.retain_failed_create(&id, &temporary, error))
+    }
+
+    fn retain_failed_create(&self, id: &str, temporary: &Path, error: io::Error) -> io::Error {
+        // A lost/rejected response is not proof that Core never accepted create.
+        // Keep authority under the caller-reserved ID, including for synchronous SDK callers.
+        let saved = (|| -> io::Result<()> {
+            if temporary.try_exists()? {
+                require_directory(temporary)?;
+                let target = self.session_directory(id)?;
+                if target.try_exists()? {
+                    return Err(io::Error::other("local target already exists"));
+                }
+                fs::rename(temporary, target)?;
+                File::open(&self.sessions)?.sync_all()?;
+            }
+            Ok(())
+        })();
+        match saved {
+            Ok(()) => io::Error::new(
+                error.kind(),
+                format!(
+                    "create {id}: {error}; local state retained; inspect or destroy this ID before retrying"
+                ),
+            ),
+            Err(save) => io::Error::new(
+                error.kind(),
+                format!(
+                    "create {id}: {error}; recover local authority at {} ({save})",
+                    temporary.display()
+                ),
+            ),
         }
-        result
     }
 
     fn create_inner(
@@ -1533,6 +1567,30 @@ mod tests {
         let remove_sessions = std::fs::remove_dir(directory.join("sessions"));
         let remove_directory = std::fs::remove_dir(directory);
         result.and(remove_sessions).and(remove_directory)
+    }
+
+    #[test]
+    fn uncertain_create_retains_local_authority_and_reports_the_id() -> io::Result<()> {
+        let root = std::env::temp_dir().join(format!("jio-pending-test-{}", random_session_id()?));
+        let client = VmClient::with_state_directory("http://127.0.0.1:8080", API_KEY, &root)?;
+        let pending = super::temporary_directory(&client.sessions)?;
+        super::write_private_file(&pending.join(super::PRIVATE_KEY), b"test-private-authority")?;
+        let id = random_session_id()?;
+        let error = client.retain_failed_create(
+            &id,
+            &pending,
+            io::Error::new(io::ErrorKind::ConnectionReset, "response lost"),
+        );
+        assert!(error.to_string().contains(&id));
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        let saved = client.sessions.join(&id);
+        assert_eq!(
+            std::fs::read(saved.join(super::PRIVATE_KEY))?,
+            b"test-private-authority"
+        );
+        remove_session_files(&saved)?;
+        std::fs::remove_dir(client.sessions)?;
+        std::fs::remove_dir(root)
     }
 
     #[test]
