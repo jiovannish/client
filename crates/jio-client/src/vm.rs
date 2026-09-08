@@ -1,5 +1,6 @@
 use crate::{
-    CreateContract, Session, SessionClient, SessionState, valid_session_id, valid_ssh_public_key,
+    CreateContract, Session, SessionClient, SessionState, VmSize, valid_session_id,
+    valid_ssh_public_key,
 };
 use std::env;
 use std::ffi::OsString;
@@ -25,6 +26,7 @@ const MAX_LOCAL_TEXT_BYTES: usize = 1024;
 const PRIVATE_KEY: &str = "id_ed25519";
 const PUBLIC_KEY: &str = "id_ed25519.pub";
 const KNOWN_HOSTS: &str = "known_hosts";
+const REQUESTED_SIZE: &str = "requested-size";
 const CURRENT_SESSION: &str = "current-session";
 const CONNECTION_PREPARE_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTION_PREPARE_RETRY: Duration = Duration::from_millis(25);
@@ -145,19 +147,43 @@ impl VmClient {
         self.create_and_report_id(|_| {})
     }
 
+    /// Creates a VM from the requested fixed resource profile.
+    pub fn create_with_size(&self, size: VmSize) -> io::Result<Vm> {
+        self.create_with_size_and_report_id(size, |_| {})
+    }
+
     /// Creates a VM and reports its ID as soon as the endpoint contract permits.
     ///
     /// Current endpoints accept a caller-reserved ID, which is reported before
     /// remote creation begins. Transitional endpoints assign the ID themselves,
     /// so it is reported only after their synchronous create response arrives.
     pub fn create_and_report_id(&self, report: impl FnOnce(&str)) -> io::Result<Vm> {
+        self.create_and_report_optional_size(None, report)
+    }
+
+    /// Creates a sized VM and reports its ID as soon as the endpoint contract permits.
+    pub fn create_with_size_and_report_id(
+        &self,
+        size: VmSize,
+        report: impl FnOnce(&str),
+    ) -> io::Result<Vm> {
+        self.create_and_report_optional_size(Some(size), report)
+    }
+
+    fn create_and_report_optional_size(
+        &self,
+        size: Option<VmSize>,
+        report: impl FnOnce(&str),
+    ) -> io::Result<Vm> {
         let contract = self.api.create_contract()?;
-        self.create_with_contract_and_report(&contract, report)
+        let size = contract.request_size(size)?;
+        self.create_with_contract_and_report(&contract, size, report)
     }
 
     fn create_with_contract_and_report(
         &self,
         contract: &CreateContract,
+        size: Option<VmSize>,
         report: impl FnOnce(&str),
     ) -> io::Result<Vm> {
         let id = random_session_id()?;
@@ -175,7 +201,7 @@ impl VmClient {
             }
         }
         let temporary = temporary_directory(&self.sessions)?;
-        let result = self.create_inner(contract, &id, &temporary);
+        let result = self.create_inner(contract, size, &id, &temporary);
         let result = if contract.caller_assigns_id() {
             result.map_err(|error| self.retain_failed_create(&id, &temporary, error))
         } else {
@@ -196,10 +222,28 @@ impl VmClient {
     /// The local SSH authority is retained immediately so a later `attach` can
     /// wait for readiness and pin the guest host key returned by Core.
     pub fn accept_create_and_report_id(&self, report: impl FnOnce(&str)) -> io::Result<String> {
+        self.accept_create_with_optional_size(None, report)
+    }
+
+    /// Starts creating a sized VM and returns once Core owns the in-progress session.
+    pub fn accept_create_with_size_and_report_id(
+        &self,
+        size: VmSize,
+        report: impl FnOnce(&str),
+    ) -> io::Result<String> {
+        self.accept_create_with_optional_size(Some(size), report)
+    }
+
+    fn accept_create_with_optional_size(
+        &self,
+        size: Option<VmSize>,
+        report: impl FnOnce(&str),
+    ) -> io::Result<String> {
         let contract = self.api.create_contract()?;
+        let size = contract.request_size(size)?;
         if !contract.caller_assigns_id() {
             return self
-                .create_with_contract_and_report(&contract, report)
+                .create_with_contract_and_report(&contract, size, report)
                 .map(|vm| vm.id());
         }
         let id = random_session_id()?;
@@ -212,7 +256,7 @@ impl VmClient {
         }
         report(&id);
         let temporary = temporary_directory(&self.sessions)?;
-        self.accept_create_inner(&contract, &id, &temporary)
+        self.accept_create_inner(&contract, size, &id, &temporary)
             .map_err(|error| self.retain_failed_create(&id, &temporary, error))
     }
 
@@ -251,12 +295,16 @@ impl VmClient {
     fn create_inner(
         &self,
         contract: &CreateContract,
+        size: Option<VmSize>,
         id: &str,
         temporary: &Path,
     ) -> io::Result<Vm> {
         let public_key = generate_client_authority(temporary)?;
+        persist_requested_size(temporary, size)?;
         let public_path = temporary.join(PUBLIC_KEY);
-        let session = self.api.create_with_contract(contract, id, &public_key)?;
+        let session = self
+            .api
+            .create_with_contract(contract, id, &public_key, size)?;
         let finalize = (|| {
             write_known_hosts(
                 &temporary.join(KNOWN_HOSTS),
@@ -286,13 +334,15 @@ impl VmClient {
     fn accept_create_inner(
         &self,
         contract: &CreateContract,
+        size: Option<VmSize>,
         id: &str,
         temporary: &Path,
     ) -> io::Result<String> {
         let public_key = generate_client_authority(temporary)?;
+        persist_requested_size(temporary, size)?;
         let ready = self
             .api
-            .accept_create_with_contract(contract, id, &public_key)?;
+            .accept_create_with_contract(contract, id, &public_key, size)?;
         let finalize = (|| {
             if let Some(session) = ready {
                 write_known_hosts(
@@ -401,6 +451,7 @@ impl VmClient {
     fn credentials(&self, session: &Session) -> io::Result<Credentials> {
         let directory = self.session_directory(&session.session_id)?;
         require_directory(&directory)?;
+        validate_requested_size(&directory, session)?;
         let private_key = directory.join(PRIVATE_KEY);
         let known_hosts = directory.join(KNOWN_HOSTS);
         require_private_file(&private_key)?;
@@ -1251,6 +1302,41 @@ fn generate_client_authority(directory: &Path) -> io::Result<String> {
     Ok(public_key)
 }
 
+fn persist_requested_size(directory: &Path, size: Option<VmSize>) -> io::Result<()> {
+    if let Some(size) = size {
+        write_private_file(
+            &directory.join(REQUESTED_SIZE),
+            format!("{}\n", size.id()).as_bytes(),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_requested_size(directory: &Path, session: &Session) -> io::Result<()> {
+    let path = directory.join(REQUESTED_SIZE);
+    let expected = match fs::symlink_metadata(&path) {
+        Ok(_) => {
+            require_private_file(&path)?;
+            let bytes = read_bounded(&path, 32)?;
+            let value = std::str::from_utf8(&bytes)
+                .map_err(invalid_data)?
+                .strip_suffix('\n')
+                .ok_or_else(|| invalid_data("locally pinned VM size has invalid framing"))?;
+            value
+                .parse::<VmSize>()
+                .map_err(|_| invalid_data("locally pinned VM size is invalid"))?
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if session.size != Some(expected) {
+        return Err(invalid_data(
+            "endpoint returned a VM size different from the locally pinned request",
+        ));
+    }
+    Ok(())
+}
+
 fn finalize_pending_credentials(directory: &Path, session: &Session) -> io::Result<()> {
     let public_path = directory.join(PUBLIC_KEY);
     let public_key = String::from_utf8(read_bounded(&public_path, MAX_LOCAL_TEXT_BYTES)?)
@@ -1278,6 +1364,7 @@ fn finalize_pending_credentials(directory: &Path, session: &Session) -> io::Resu
 fn same_session_identity(left: &Session, right: &Session) -> bool {
     left.session_id == right.session_id
         && left.runtime == right.runtime
+        && left.size == right.size
         && left.template_id == right.template_id
         && left.core_sha256 == right.core_sha256
         && left.volume_id == right.volume_id
@@ -1441,7 +1528,7 @@ fn require_directory(path: &Path) -> io::Result<()> {
 }
 
 fn remove_session_files(directory: &Path) -> io::Result<()> {
-    for name in [PRIVATE_KEY, PUBLIC_KEY, KNOWN_HOSTS] {
+    for name in [PRIVATE_KEY, PUBLIC_KEY, KNOWN_HOSTS, REQUESTED_SIZE] {
         let path = directory.join(name);
         match fs::remove_file(path) {
             Ok(()) => {}
@@ -1464,10 +1551,11 @@ fn invalid_data(message: impl ToString) -> io::Error {
 mod tests {
     use super::{
         Credentials, LogoutFilter, TtyMode, VmClient, create_private_directory, drain_bounded,
-        random_session_id, remove_session_files, replace_known_hosts, require_private_file,
-        run_bounded, same_session_identity, shell_quote, validate_remote_path, write_known_hosts,
+        persist_requested_size, random_session_id, remove_session_files, replace_known_hosts,
+        require_private_file, run_bounded, same_session_identity, shell_quote,
+        validate_remote_path, validate_requested_size, write_known_hosts,
     };
-    use crate::{Session, SessionClient, SessionState};
+    use crate::{Session, SessionClient, SessionState, VmSize};
     use std::ffi::OsStr;
     use std::io;
     use std::net::Ipv4Addr;
@@ -1485,6 +1573,9 @@ mod tests {
             state: SessionState::Ready,
             generation: 1,
             runtime: None,
+            size: None,
+            vcpu_count: Some(2),
+            memory_mib: Some(4096),
             template_id: "a".repeat(64),
             core_sha256: "b".repeat(64),
             volume_id: "cd".repeat(16),
@@ -1542,6 +1633,30 @@ mod tests {
         let mut changed = current.clone();
         changed.runtime = Some("python3.12-source-v0".into());
         assert!(!same_session_identity(&current, &changed));
+
+        let mut changed = current.clone();
+        changed.size = Some(VmSize::Medium);
+        assert!(!same_session_identity(&current, &changed));
+    }
+
+    #[test]
+    fn pins_the_requested_size_until_async_creation_is_ready() -> io::Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("jio-client-size-{}", random_session_id()?));
+        create_private_directory(&directory)?;
+        let result = (|| {
+            persist_requested_size(&directory, Some(VmSize::Medium))?;
+            require_private_file(&directory.join(super::REQUESTED_SIZE))?;
+
+            let mut session = ready_session();
+            session.size = Some(VmSize::Medium);
+            validate_requested_size(&directory, &session)?;
+            session.size = Some(VmSize::Large);
+            assert!(validate_requested_size(&directory, &session).is_err());
+            Ok(())
+        })();
+        let cleanup = remove_session_files(&directory);
+        result.and(cleanup)
     }
 
     #[test]

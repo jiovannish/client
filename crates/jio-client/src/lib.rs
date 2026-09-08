@@ -10,6 +10,7 @@ use std::net::Ipv4Addr;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,82 @@ const CREATE_SESSION_TIMEOUT: Duration = Duration::from_secs(310);
 const SSH_ED25519_PREFIX: &[u8] = b"ssh-ed25519 ";
 const SSH_ED25519_BASE64_BYTES: usize = 68;
 const SSH_ED25519_BLOB_BYTES: usize = 51;
+
+/// A fixed Jio VM resource profile.
+///
+/// Sizes identify immutable templates; they do not resize a running VM.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum VmSize {
+    #[serde(rename = "small")]
+    #[default]
+    Small,
+    #[serde(rename = "medium")]
+    Medium,
+    #[serde(rename = "large")]
+    Large,
+    #[serde(rename = "xlarge")]
+    XLarge,
+}
+
+impl VmSize {
+    pub const ALL: [Self; 4] = [Self::Small, Self::Medium, Self::Large, Self::XLarge];
+
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::Large => "large",
+            Self::XLarge => "xlarge",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Small => "Small",
+            Self::Medium => "Medium",
+            Self::Large => "Large",
+            Self::XLarge => "X-Large",
+        }
+    }
+
+    pub const fn vcpus(self) -> u8 {
+        match self {
+            Self::Small => 1,
+            Self::Medium => 2,
+            Self::Large => 4,
+            Self::XLarge => 8,
+        }
+    }
+
+    pub const fn memory_mib(self) -> u32 {
+        match self {
+            Self::Small => 512,
+            Self::Medium => 4 * 1024,
+            Self::Large => 8 * 1024,
+            Self::XLarge => 16 * 1024,
+        }
+    }
+}
+
+impl std::fmt::Display for VmSize {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.id())
+    }
+}
+
+impl FromStr for VmSize {
+    type Err = io::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "small" => Ok(Self::Small),
+            "medium" => Ok(Self::Medium),
+            "large" => Ok(Self::Large),
+            "xlarge" => Ok(Self::XLarge),
+            _ => Err(invalid(format!("unknown VM size: {value}"))),
+        }
+    }
+}
 
 pub struct RunRequest {
     endpoint: String,
@@ -178,6 +255,7 @@ pub struct SessionClient {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
     Starting,
@@ -189,6 +267,7 @@ pub enum SessionState {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(test, derive(Serialize))]
 #[serde(deny_unknown_fields)]
 pub struct Session {
     pub session_id: String,
@@ -196,6 +275,12 @@ pub struct Session {
     pub generation: u64,
     /// Present only when connected to the transitional runtime-selected Core API.
     pub runtime: Option<String>,
+    /// Present when Core supports per-session size selection.
+    pub size: Option<VmSize>,
+    /// Present when Core reports the admitted template's CPU profile.
+    pub vcpu_count: Option<u8>,
+    /// Present when Core reports the admitted template's memory profile.
+    pub memory_mib: Option<u64>,
     pub template_id: String,
     pub core_sha256: String,
     pub volume_id: String,
@@ -229,12 +314,15 @@ pub struct Session {
 #[derive(Deserialize)]
 struct ApiHealthResponse {
     runtime: Option<String>,
+    sizes: Option<Vec<VmSize>>,
 }
 
 #[derive(Serialize)]
 struct ApiCreateSessionRequest<'a> {
     session_id: &'a str,
     client_public_key: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<VmSize>,
 }
 
 #[derive(Serialize)]
@@ -245,13 +333,47 @@ struct ApiRuntimeCreateSessionRequest<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CreateContract {
-    CallerAssignedId,
+    CallerAssignedId { sizes: Option<Vec<VmSize>> },
     ServerAssignedId { runtime: String },
 }
 
 impl CreateContract {
     pub(crate) fn caller_assigns_id(&self) -> bool {
-        matches!(self, Self::CallerAssignedId)
+        matches!(self, Self::CallerAssignedId { .. })
+    }
+
+    pub(crate) fn request_size(&self, requested: Option<VmSize>) -> io::Result<Option<VmSize>> {
+        let Some(requested) = requested else {
+            return Ok(None);
+        };
+        let Self::CallerAssignedId { sizes } = self else {
+            return legacy_size(requested);
+        };
+        let Some(sizes) = sizes else {
+            return legacy_size(requested);
+        };
+        if sizes.contains(&requested) {
+            Ok(Some(requested))
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "the endpoint does not offer the configured {} VM size",
+                    requested.label()
+                ),
+            ))
+        }
+    }
+}
+
+fn legacy_size(requested: VmSize) -> io::Result<Option<VmSize>> {
+    if requested == VmSize::Small {
+        Ok(None)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the endpoint does not support selectable VM sizes; run `jio config` and choose Small",
+        ))
     }
 }
 
@@ -294,7 +416,18 @@ impl SessionClient {
 
     pub fn create(&self, id: &str, client_public_key: &str) -> io::Result<Session> {
         let contract = self.create_contract()?;
-        self.create_with_contract(&contract, id, client_public_key)
+        self.create_with_contract(&contract, id, client_public_key, None)
+    }
+
+    /// Creates a session from the requested fixed resource profile.
+    pub fn create_with_size(
+        &self,
+        id: &str,
+        client_public_key: &str,
+        size: VmSize,
+    ) -> io::Result<Session> {
+        let contract = self.create_contract()?;
+        self.create_with_contract(&contract, id, client_public_key, Some(size))
     }
 
     pub(crate) fn create_contract(&self) -> io::Result<CreateContract> {
@@ -314,8 +447,9 @@ impl SessionClient {
         contract: &CreateContract,
         id: &str,
         client_public_key: &str,
+        size: Option<VmSize>,
     ) -> io::Result<Session> {
-        match self.request_create(contract, id, client_public_key, false)? {
+        match self.request_create(contract, id, client_public_key, size, false)? {
             SessionResponse::Complete(session) if session.state == SessionState::Ready => {
                 Ok(*session)
             }
@@ -330,8 +464,9 @@ impl SessionClient {
         contract: &CreateContract,
         id: &str,
         client_public_key: &str,
+        size: Option<VmSize>,
     ) -> io::Result<Option<Session>> {
-        match self.request_create(contract, id, client_public_key, true)? {
+        match self.request_create(contract, id, client_public_key, size, true)? {
             SessionResponse::Starting => Ok(None),
             SessionResponse::Complete(session) if session.state == SessionState::Ready => {
                 Ok(Some(*session))
@@ -347,6 +482,7 @@ impl SessionClient {
         contract: &CreateContract,
         id: &str,
         client_public_key: &str,
+        size: Option<VmSize>,
         respond_async: bool,
     ) -> io::Result<SessionResponse> {
         if !valid_session_id(id) {
@@ -364,7 +500,8 @@ impl SessionClient {
             CREATE_SESSION_TIMEOUT
         };
         let connection = Connection::open(&self.endpoint, &self.api_key, timeout)?;
-        let body = encode_create_request(contract, id, client_public_key)?;
+        let size = contract.request_size(size)?;
+        let body = encode_create_request(contract, id, client_public_key, size)?;
         let mut request = connection
             .client
             .post(format!("{}/v0/sessions", connection.base_url))
@@ -375,7 +512,7 @@ impl SessionClient {
             request = request.header("prefer", "respond-async");
         }
         let response = request.send().map_err(other)?;
-        decode_session_response(response, contract.caller_assigns_id().then_some(id))
+        decode_session_response(response, contract.caller_assigns_id().then_some(id), size)
     }
 
     pub fn get(&self, id: &str) -> io::Result<Session> {
@@ -469,24 +606,49 @@ impl SessionClient {
 }
 
 fn create_contract_from_health(health: ApiHealthResponse) -> io::Result<CreateContract> {
-    match health.runtime {
-        Some(runtime) if is_runtime(&runtime) => Ok(CreateContract::ServerAssignedId { runtime }),
-        Some(_) => Err(invalid("endpoint returned an invalid runtime identifier")),
-        None => Ok(CreateContract::CallerAssignedId),
+    match (health.runtime, health.sizes) {
+        (Some(runtime), None) if is_runtime(&runtime) => {
+            Ok(CreateContract::ServerAssignedId { runtime })
+        }
+        (Some(_), None) => Err(invalid("endpoint returned an invalid runtime identifier")),
+        (Some(_), Some(_)) => Err(invalid(
+            "endpoint advertised incompatible runtime and size create contracts",
+        )),
+        (None, Some(sizes)) if sizes.is_empty() => {
+            Err(invalid("endpoint advertised an empty VM size catalog"))
+        }
+        (None, Some(sizes)) if has_duplicate_sizes(&sizes) => {
+            Err(invalid("endpoint advertised duplicate VM sizes"))
+        }
+        (None, sizes) => Ok(CreateContract::CallerAssignedId { sizes }),
     }
+}
+
+fn has_duplicate_sizes(sizes: &[VmSize]) -> bool {
+    sizes
+        .iter()
+        .enumerate()
+        .any(|(index, size)| sizes[..index].contains(size))
 }
 
 fn encode_create_request(
     contract: &CreateContract,
     id: &str,
     client_public_key: &str,
+    size: Option<VmSize>,
 ) -> io::Result<Vec<u8>> {
     match contract {
-        CreateContract::CallerAssignedId => serde_json::to_vec(&ApiCreateSessionRequest {
+        CreateContract::CallerAssignedId { .. } => serde_json::to_vec(&ApiCreateSessionRequest {
             session_id: id,
             client_public_key,
+            size,
         }),
         CreateContract::ServerAssignedId { runtime } => {
+            if size.is_some() {
+                return Err(invalid(
+                    "runtime-selected endpoints cannot receive a VM size",
+                ));
+            }
             serde_json::to_vec(&ApiRuntimeCreateSessionRequest {
                 runtime,
                 client_public_key,
@@ -503,12 +665,13 @@ fn get_session_response(connection: &Connection, id: &str) -> io::Result<Session
         .bearer_auth(&connection.api_key)
         .send()
         .map_err(other)?;
-    decode_session_response(response, Some(id))
+    decode_session_response(response, Some(id), None)
 }
 
 fn decode_session_response(
     response: Response,
     expected_id: Option<&str>,
+    expected_size: Option<VmSize>,
 ) -> io::Result<SessionResponse> {
     if response.status() == StatusCode::ACCEPTED {
         let Some(expected_id) = expected_id else {
@@ -529,10 +692,20 @@ fn decode_session_response(
     if expected_id.is_some_and(|id| session.session_id != id) {
         return Err(invalid("endpoint returned a different session ID"));
     }
+    if expected_size.is_some_and(|size| session.size != Some(size)) {
+        return Err(invalid(
+            "endpoint returned a session with a different VM size",
+        ));
+    }
     Ok(SessionResponse::Complete(Box::new(session)))
 }
 
 fn validate_session(session: &Session) -> io::Result<()> {
+    if session.runtime.is_some() && session.size.is_some() {
+        return Err(invalid(
+            "session contains incompatible runtime and size selectors",
+        ));
+    }
     let system_files_consistent = match (
         &session.system_files_volume_id,
         session.system_files_ready_ns,
@@ -1079,7 +1252,7 @@ mod tests {
     }
     use super::{
         ApiHealthResponse, ApiRunResponse, ApiVmResult, CreateContract, RunRequest, Session,
-        SessionClient, SessionState, create_contract_from_health, encode_create_request,
+        SessionClient, SessionState, VmSize, create_contract_from_health, encode_create_request,
         normalize_endpoint, valid_ssh_public_key, validate, validate_session,
     };
     use std::io;
@@ -1149,7 +1322,16 @@ mod tests {
         let current: ApiHealthResponse = serde_json::from_str(r#"{"status":"experimental"}"#)?;
         assert_eq!(
             create_contract_from_health(current)?,
-            CreateContract::CallerAssignedId
+            CreateContract::CallerAssignedId { sizes: None }
+        );
+
+        let sized: ApiHealthResponse =
+            serde_json::from_str(r#"{"status":"experimental","sizes":["small","medium"]}"#)?;
+        assert_eq!(
+            create_contract_from_health(sized)?,
+            CreateContract::CallerAssignedId {
+                sizes: Some(vec![VmSize::Small, VmSize::Medium])
+            }
         );
 
         let transitional: ApiHealthResponse =
@@ -1163,6 +1345,15 @@ mod tests {
 
         let invalid: ApiHealthResponse = serde_json::from_str(r#"{"runtime":"../python"}"#)?;
         assert!(create_contract_from_health(invalid).is_err());
+
+        for invalid in [
+            r#"{"sizes":[]}"#,
+            r#"{"sizes":["small","small"]}"#,
+            r#"{"runtime":"python3.12-source-v0","sizes":["small"]}"#,
+        ] {
+            let health: ApiHealthResponse = serde_json::from_str(invalid)?;
+            assert!(create_contract_from_health(health).is_err());
+        }
         Ok(())
     }
 
@@ -1172,13 +1363,27 @@ mod tests {
         let key =
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f";
         let current: serde_json::Value = serde_json::from_slice(&encode_create_request(
-            &CreateContract::CallerAssignedId,
+            &CreateContract::CallerAssignedId { sizes: None },
             &id,
             key,
+            None,
         )?)?;
         assert_eq!(current["session_id"], id);
         assert_eq!(current["client_public_key"], key);
         assert!(current.get("runtime").is_none());
+        assert!(current.get("size").is_none());
+        assert_eq!(current.as_object().map(|object| object.len()), Some(2));
+
+        let sized: serde_json::Value = serde_json::from_slice(&encode_create_request(
+            &CreateContract::CallerAssignedId {
+                sizes: Some(vec![VmSize::Small, VmSize::Medium]),
+            },
+            &id,
+            key,
+            Some(VmSize::Medium),
+        )?)?;
+        assert_eq!(sized["size"], "medium");
+        assert_eq!(sized.as_object().map(|object| object.len()), Some(3));
 
         let transitional: serde_json::Value = serde_json::from_slice(&encode_create_request(
             &CreateContract::ServerAssignedId {
@@ -1186,10 +1391,28 @@ mod tests {
             },
             &id,
             key,
+            None,
         )?)?;
         assert_eq!(transitional["runtime"], "python3.12-source-v0");
         assert_eq!(transitional["client_public_key"], key);
         assert!(transitional.get("session_id").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn gates_size_selection_on_endpoint_capabilities() -> io::Result<()> {
+        let legacy = CreateContract::CallerAssignedId { sizes: None };
+        assert_eq!(legacy.request_size(Some(VmSize::Small))?, None);
+        assert!(legacy.request_size(Some(VmSize::Medium)).is_err());
+
+        let sized = CreateContract::CallerAssignedId {
+            sizes: Some(vec![VmSize::Small, VmSize::Medium]),
+        };
+        assert_eq!(
+            sized.request_size(Some(VmSize::Medium))?,
+            Some(VmSize::Medium)
+        );
+        assert!(sized.request_size(Some(VmSize::Large)).is_err());
         Ok(())
     }
 
@@ -1263,6 +1486,35 @@ mod tests {
     }
 
     #[test]
+    fn accepts_core_responses_with_or_without_resource_metadata() -> io::Result<()> {
+        let mut wire = serde_json::to_value(persistent_session())?;
+        let fields = wire
+            .as_object_mut()
+            .ok_or_else(|| io::Error::other("session must be an object"))?;
+        for field in ["size", "vcpu_count", "memory_mib"] {
+            fields.remove(field);
+        }
+        let legacy: Session = serde_json::from_value(wire.clone())?;
+        validate_session(&legacy)?;
+        assert_eq!(
+            (legacy.size, legacy.vcpu_count, legacy.memory_mib),
+            (None, None, None)
+        );
+
+        wire["vcpu_count"] = serde_json::json!(2);
+        wire["memory_mib"] = serde_json::json!(4096);
+        let current: Session = serde_json::from_value(wire.clone())?;
+        validate_session(&current)?;
+        assert_eq!(
+            (current.vcpu_count, current.memory_mib),
+            (Some(2), Some(4096))
+        );
+        wire["unexpected_field"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<Session>(wire).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn validates_the_persistent_session_contract() -> io::Result<()> {
         let session = persistent_session();
         validate_session(&session)?;
@@ -1270,6 +1522,11 @@ mod tests {
         let mut mismatched = session.clone();
         mismatched.system_files_ready_ns = None;
         assert!(validate_session(&mismatched).is_err());
+
+        let mut incompatible = session.clone();
+        incompatible.runtime = Some("python3.12-source-v0".into());
+        incompatible.size = Some(VmSize::Small);
+        assert!(validate_session(&incompatible).is_err());
 
         let mut restarted = session;
         restarted.generation = 2;
@@ -1284,6 +1541,8 @@ mod tests {
             "state": "ready",
             "generation": 1,
             "runtime": "python3.12-source-v0",
+            "vcpu_count": 2,
+            "memory_mib": 4096,
             "template_id": "c".repeat(64),
             "core_sha256": "d".repeat(64),
             "volume_id": "ef".repeat(16),
@@ -1299,6 +1558,8 @@ mod tests {
         }))?;
         validate_session(&session)?;
         assert_eq!(session.runtime.as_deref(), Some("python3.12-source-v0"));
+        assert_eq!(session.vcpu_count, Some(2));
+        assert_eq!(session.memory_mib, Some(4096));
         assert!(session.worker_ready_ns.is_none());
 
         let mut mixed = session;
@@ -1313,6 +1574,9 @@ mod tests {
             state: SessionState::Ready,
             generation: 1,
             runtime: None,
+            size: None,
+            vcpu_count: Some(2),
+            memory_mib: Some(4096),
             template_id: "c".repeat(64),
             core_sha256: "d".repeat(64),
             volume_id: "ef".repeat(16),
