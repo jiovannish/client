@@ -112,6 +112,25 @@ impl FromStr for VmSize {
     }
 }
 
+/// Hosted account reservations, not measured utilization or billed consumption.
+/// All API keys on the account share these limits.
+#[derive(Debug, Deserialize)]
+pub struct AccountUsage {
+    pub account_id: String,
+    pub limits: ResourceUsage,
+    pub reserved: ResourceUsage,
+    pub compute_sessions: u64,
+    pub retained_sessions: u64,
+    pub session_ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResourceUsage {
+    pub cpu: u64,
+    pub memory_mib: u64,
+    pub disk_mib: u64,
+}
+
 pub struct RunRequest {
     endpoint: String,
     api_key: String,
@@ -401,6 +420,38 @@ impl SessionClient {
 
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    /// Reads the current API key's shared account quota from a hosted control plane.
+    pub fn usage(&self) -> io::Result<AccountUsage> {
+        let connection = Connection::open(&self.endpoint, &self.api_key, DEFAULT_REQUEST_TIMEOUT)?;
+        let response = connection
+            .client
+            .get(format!("{}/v1/usage", connection.base_url))
+            .bearer_auth(&connection.api_key)
+            .send()
+            .map_err(other)?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "jio usage requires a control plane with usage support; standalone Core has no account quotas",
+            ));
+        }
+        let usage: AccountUsage = decode(response)?;
+        if usage.account_id.is_empty()
+            || usage.account_id.len() > 64
+            || !usage
+                .account_id
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
+            || usage.limits.cpu == 0
+            || usage.limits.memory_mib == 0
+            || usage.limits.disk_mib == 0
+            || usage.session_ttl_seconds == Some(0)
+        {
+            return Err(invalid("endpoint returned invalid account usage"));
+        }
+        Ok(usage)
     }
 
     pub fn uses_http_endpoint(&self) -> bool {
@@ -1255,6 +1306,72 @@ fn other(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn usage_uses_authenticated_hosted_route_and_rejects_invalid_responses() -> std::io::Result<()>
+    {
+        use std::io::{BufRead, Write};
+        let valid = r#"{"account_id":"demo","limits":{"cpu":8,"memory_mib":16384,"disk_mib":131072},"reserved":{"cpu":4,"memory_mib":8192,"disk_mib":41216},"compute_sessions":1,"retained_sessions":1,"session_ttl_seconds":1800}"#;
+        for (status, body, expected) in [
+            (200, valid.to_owned(), None),
+            (
+                200,
+                valid.replace("\"cpu\":4", "\"cpu\":-4"),
+                Some(std::io::ErrorKind::InvalidData),
+            ),
+            (
+                200,
+                valid.replace("demo", "bad\\u001baccount"),
+                Some(std::io::ErrorKind::InvalidData),
+            ),
+            (404, "{}".into(), Some(std::io::ErrorKind::Unsupported)),
+            (
+                401,
+                r#"{"error":"invalid API key"}"#.into(),
+                Some(std::io::ErrorKind::Other),
+            ),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            let endpoint = format!("http://{}", listener.local_addr()?);
+            let server = std::thread::spawn(move || -> std::io::Result<()> {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+                let mut reader = std::io::BufReader::new(&stream);
+                let mut headers = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line)? == 0 || line == "\r\n" {
+                        break;
+                    }
+                    headers.push_str(&line);
+                    assert!(headers.len() < 8192);
+                }
+                assert!(headers.starts_with("GET /v1/usage HTTP/1.1\r\n"));
+                assert!(
+                    headers
+                        .to_ascii_lowercase()
+                        .contains(&format!("authorization: bearer {}", "a".repeat(64)))
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            });
+            let result = super::SessionClient::new(endpoint, "a".repeat(64))?.usage();
+            server
+                .join()
+                .map_err(|_| std::io::Error::other("test server failed"))??;
+            if let Some(kind) = expected {
+                assert!(matches!(result, Err(error) if error.kind() == kind));
+            } else {
+                let usage = result?;
+                assert_eq!(usage.reserved.cpu, 4);
+                assert_eq!(usage.session_ttl_seconds, Some(1800));
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn queued_delete_is_not_completed_deletion() -> std::io::Result<()> {
         use std::io::{Read, Write};

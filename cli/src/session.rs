@@ -37,6 +37,50 @@ const INSTALL_CODEX_AUTH: &str = concat!(
     "trap - 0 1 2 15",
 );
 
+pub fn usage(host: String) -> io::Result<()> {
+    let api_key = env::var("JIO_API_KEY")
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "JIO_API_KEY is required"))?;
+    let usage = jio_client::SessionClient::new(host, api_key)?.usage()?;
+    print_usage(&mut io::stdout().lock(), &usage)
+}
+
+fn print_usage(output: &mut impl io::Write, usage: &jio_client::AccountUsage) -> io::Result<()> {
+    writeln!(
+        output,
+        "Account: {} (shared by its API keys)",
+        usage.account_id
+    )?;
+    writeln!(output, "\n                 Reserved / Limit")?;
+    writeln!(
+        output,
+        "vCPU             {} / {}",
+        usage.reserved.cpu, usage.limits.cpu
+    )?;
+    writeln!(
+        output,
+        "Memory (MiB)     {} / {}",
+        usage.reserved.memory_mib, usage.limits.memory_mib
+    )?;
+    writeln!(
+        output,
+        "Disk (MiB)       {} / {}",
+        usage.reserved.disk_mib, usage.limits.disk_mib
+    )?;
+    writeln!(
+        output,
+        "\nSessions: {} reserving compute, {} retaining disk",
+        usage.compute_sessions, usage.retained_sessions
+    )?;
+    match usage.session_ttl_seconds {
+        Some(seconds) => writeln!(output, "Session lifetime: {seconds}s maximum")?,
+        None => writeln!(output, "Session lifetime: no account time limit")?,
+    }
+    writeln!(
+        output,
+        "\nCurrent allocations, including pending/uncertain work; not utilization or billing."
+    )
+}
+
 pub fn create(host: String, size: VmSize) -> io::Result<Session> {
     let client = client(host)?;
     let session = client.create_with_size(size)?.session();
@@ -272,6 +316,44 @@ fn invalid(message: impl ToString) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn usage_labels_reservations_and_optional_lifetime() -> std::io::Result<()> {
+        use jio_client::{AccountUsage, ResourceUsage};
+        let mut usage = AccountUsage {
+            account_id: "friend".into(),
+            limits: ResourceUsage {
+                cpu: 4,
+                memory_mib: 8192,
+                disk_mib: 65792,
+            },
+            reserved: ResourceUsage {
+                cpu: 0,
+                memory_mib: 0,
+                disk_mib: 41216,
+            },
+            compute_sessions: 0,
+            retained_sessions: 1,
+            session_ttl_seconds: Some(1800),
+        };
+        for lifetime in [Some(1800), None] {
+            usage.session_ttl_seconds = lifetime;
+            let mut output = Vec::new();
+            super::print_usage(&mut output, &usage)?;
+            let text = String::from_utf8(output).map_err(std::io::Error::other)?;
+            assert!(
+                text.contains("41216 / 65792")
+                    && text.contains("0 reserving compute, 1 retaining disk")
+            );
+            assert!(text.contains(if lifetime.is_some() {
+                "1800s maximum"
+            } else {
+                "no account time limit"
+            }));
+            assert!(text.contains("not utilization or billing"));
+        }
+        Ok(())
+    }
+
     use super::{read_codex_auth, require_success};
     use jio_client::CommandResult;
     use std::fs::{self, OpenOptions, Permissions};

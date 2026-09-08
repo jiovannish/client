@@ -19,6 +19,7 @@ const USAGE: &str = concat!(
     "  run       <source> [options]                     Run source code in Jio\n",
     "  create    [options]                              Create a persistent VM\n",
     "  config                                           Configure Jio defaults\n",
+    "  usage     [options]                              Show account limits and reservations\n",
     "  exec      <session-id> <command> [options]       Run a command in a VM\n",
     "  connect   [session-id] [options]                 Open an interactive shell\n",
     "  stop      <session-id> [options]                 Stop compute and retain files\n",
@@ -43,6 +44,12 @@ const CREATE_USAGE: &str = concat!(
     "usage: jio create [options]\n",
     "\n",
     "  --host <host>              Override JIO_ENDPOINT or JIO_HOST",
+);
+
+const ACCOUNT_USAGE: &str = concat!(
+    "usage: jio usage [options]\n\n",
+    "  --host <host>              Override JIO_ENDPOINT or JIO_HOST\n\n",
+    "Show the current API key's shared account limits and allocations from the control plane.",
 );
 
 const CONFIG_USAGE: &str = concat!(
@@ -129,7 +136,7 @@ fi
 
 _jio() {
   local -a commands agents shells options
-  commands=(run create config exec connect stop start destroy login yolo completion)
+  commands=(run create config usage exec connect stop start destroy login yolo completion)
   agents=(codex)
   shells=(zsh bash fish)
 
@@ -165,7 +172,7 @@ _jio() {
     destroy)
       options=(--yes --host --help -h)
       ;;
-    create|connect|stop|start)
+    usage|create|connect|stop|start)
       options=(--host --help -h)
       ;;
   esac
@@ -182,7 +189,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
   command="${COMP_WORDS[1]}"
 
   if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=($(compgen -W 'run create config exec connect stop start destroy login yolo completion' -- "$current"))
+    COMPREPLY=($(compgen -W 'run create config usage exec connect stop start destroy login yolo completion' -- "$current"))
     return
   fi
   if [[ $COMP_CWORD -eq 2 && ( $command == login || $command == yolo ) ]]; then
@@ -199,7 +206,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
     run)       COMPREPLY=($(compgen -W '--language --instances --concurrency --host --help -h' -- "$current")) ;;
     exec)      COMPREPLY=($(compgen -W '--timeout --host --help -h' -- "$current")) ;;
     destroy)   COMPREPLY=($(compgen -W '--yes --host --help -h' -- "$current")) ;;
-    login|yolo|create|connect|stop|start)
+    usage|login|yolo|create|connect|stop|start)
                COMPREPLY=($(compgen -W '--host --help -h' -- "$current")) ;;
   esac
 }
@@ -207,13 +214,13 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
 complete -F _jio_completion jio"#;
 
 const FISH_COMPLETION: &str = r#"complete -c jio -f
-complete -c jio -n '__fish_use_subcommand' -a 'run create config exec connect stop start destroy login yolo completion'
+complete -c jio -n '__fish_use_subcommand' -a 'run create config usage exec connect stop start destroy login yolo completion'
 complete -c jio -n '__fish_seen_subcommand_from login yolo; and test (count (commandline -opc)) -eq 2' -a codex
 complete -c jio -n '__fish_seen_subcommand_from completion; and test (count (commandline -opc)) -eq 2' -a 'zsh bash fish'
 complete -c jio -n '__fish_seen_subcommand_from run' -l language -l instances -l concurrency -l host
 complete -c jio -n '__fish_seen_subcommand_from exec' -l timeout -l host
 complete -c jio -n '__fish_seen_subcommand_from destroy' -l yes -l host
-complete -c jio -n '__fish_seen_subcommand_from create connect stop start login yolo' -l host"#;
+complete -c jio -n '__fish_seen_subcommand_from usage create connect stop start login yolo' -l host"#;
 
 enum Invocation {
     Help(&'static str),
@@ -227,6 +234,9 @@ enum Invocation {
         host: String,
     },
     Config,
+    Usage {
+        host: String,
+    },
     Connect {
         host: String,
         id: Option<String>,
@@ -294,6 +304,7 @@ fn execute(invocation: Invocation) -> io::Result<()> {
         } => app::run(source, host, instances, concurrency),
         Invocation::Create { host } => create(host),
         Invocation::Config => config::run(),
+        Invocation::Usage { host } => session::usage(host),
         Invocation::Connect { host, id } => session::connect(host, id.as_deref()),
         Invocation::Exec {
             host,
@@ -434,7 +445,8 @@ fn options_from(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
     match arguments.next().as_deref() {
         Some(command) if is_help(command) => Ok(Invocation::Help(USAGE)),
         Some(command) if command == OsStr::new("run") => run_options(arguments),
-        Some(command) if command == OsStr::new("create") => create_options(arguments),
+        Some(command) if command == OsStr::new("create") => host_options(arguments, CREATE_USAGE),
+        Some(command) if command == OsStr::new("usage") => host_options(arguments, ACCOUNT_USAGE),
         Some(command) if command == OsStr::new("config") => config_options(arguments),
         Some(command) if command == OsStr::new("connect") => connect_options(arguments),
         Some(command) if command == OsStr::new("exec") => exec_options(arguments),
@@ -699,22 +711,28 @@ fn exec_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
     })
 }
 
-fn create_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invocation> {
+fn host_options(
+    mut arguments: impl Iterator<Item = OsString>,
+    help: &'static str,
+) -> io::Result<Invocation> {
     let mut host = None;
     while let Some(argument) = arguments.next() {
         if argument == "--host" {
             if host.is_some() {
-                return Err(usage(CREATE_USAGE));
+                return Err(usage(help));
             }
-            host = Some(arguments.next().ok_or_else(|| usage(CREATE_USAGE))?);
+            host = Some(arguments.next().ok_or_else(|| usage(help))?);
         } else if is_help(&argument) {
-            return Ok(Invocation::Help(CREATE_USAGE));
+            return Ok(Invocation::Help(help));
         } else {
-            return Err(usage(CREATE_USAGE));
+            return Err(usage(help));
         }
     }
-    Ok(Invocation::Create {
-        host: session::host(host)?,
+    let host = session::host(host)?;
+    Ok(if help == ACCOUNT_USAGE {
+        Invocation::Usage { host }
+    } else {
+        Invocation::Create { host }
     })
 }
 
@@ -863,9 +881,9 @@ fn usage(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        COMPLETION_USAGE, CONFIG_USAGE, CONNECT_USAGE, CREATE_USAGE, CompletionShell,
-        DESTROY_USAGE, EXEC_USAGE, Invocation, LOGIN_USAGE, RUN_USAGE, START_USAGE, STOP_USAGE,
-        USAGE, YOLO_USAGE, options_from, prompt_connect, prompt_destroy,
+        ACCOUNT_USAGE, COMPLETION_USAGE, CONFIG_USAGE, CONNECT_USAGE, CREATE_USAGE,
+        CompletionShell, DESTROY_USAGE, EXEC_USAGE, Invocation, LOGIN_USAGE, RUN_USAGE,
+        START_USAGE, STOP_USAGE, USAGE, YOLO_USAGE, options_from, prompt_connect, prompt_destroy,
     };
     use std::ffi::OsString;
     use std::io::Cursor;
@@ -890,6 +908,21 @@ mod tests {
             Ok(Invocation::Connect { id: Some(id), .. })
                 if id == "abababababababababababababababab"
         ));
+    }
+
+    #[test]
+    fn usage_accepts_only_host_options() {
+        assert!(
+            matches!(options_from(["usage", "--host", "https://api.jio.dev"].into_iter().map(OsString::from)),
+            Ok(Invocation::Usage { host }) if host == "https://api.jio.dev")
+        );
+        for args in [
+            vec!["usage", "alice"],
+            vec!["usage", "--host"],
+            vec!["usage", "--host", "a", "--host", "b"],
+        ] {
+            assert!(options_from(args.into_iter().map(OsString::from)).is_err());
+        }
     }
 
     #[test]
@@ -1098,6 +1131,7 @@ mod tests {
         for (command, expected) in [
             ("run", RUN_USAGE),
             ("create", CREATE_USAGE),
+            ("usage", ACCOUNT_USAGE),
             ("config", CONFIG_USAGE),
             ("exec", EXEC_USAGE),
             ("connect", CONNECT_USAGE),

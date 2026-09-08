@@ -108,6 +108,13 @@ cargo run --quiet --release -p jio-cli -- start "$session"
 cargo run --quiet --release -p jio-cli -- destroy "$session" --yes
 ```
 
+`jio usage` reads the current API key's account limits and current CPU, memory and
+disk reservations from Jio. Keys on the same account share
+quotas. Pending/uncertain work stays reserved, stopped VMs retain disk, and
+confirmed destruction releases it. It also shows the session lifetime limit
+(30 minutes for friend accounts). These are allocations, not cumulative spend,
+host utilization or billing. Standalone Core does not expose account usage.
+
 `jio config` opens a compact inline size picker without clearing terminal history.
 Enter opens `Size`, the up and
 down arrows move between the fixed profiles, Enter saves the choice, and
