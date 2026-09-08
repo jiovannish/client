@@ -2,7 +2,7 @@ use crate::runner::{self, Event as RunnerEvent};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use jio_client::{Event as ClientEvent, TemplateAdmission, VmResult};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Gauge, Paragraph, Row, Table};
 use ratatui::{DefaultTerminal, Frame};
@@ -78,13 +78,13 @@ impl App {
             }
 
             terminal.draw(|frame| self.draw(frame))?;
-            if event::poll(Duration::from_millis(50))? {
-                if let Event::Key(key) = event::read()? {
-                    let quit = key.kind == KeyEventKind::Press
-                        && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc);
-                    if quit && self.finished {
-                        return Ok(());
-                    }
+            if event::poll(Duration::from_millis(50))?
+                && let Event::Key(key) = event::read()?
+            {
+                let quit = key.kind == KeyEventKind::Press
+                    && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc);
+                if quit && self.finished {
+                    return Ok(());
                 }
             }
         }

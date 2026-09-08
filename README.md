@@ -51,6 +51,7 @@ SSH-ready boundaries only; finer-grained timing fields are returned as
 
 Local SDK builds require Rust 1.85.1. The Python package supports Python 3.9+
 and the Node package supports Node.js 18+.
+Building the CLI from source requires Rust 1.88 or newer.
 
 ### Python
 

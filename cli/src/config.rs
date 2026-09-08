@@ -1,7 +1,7 @@
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use jio_client::VmSize;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame, TerminalOptions, Viewport};
@@ -469,7 +469,8 @@ mod tests {
     }
 
     #[test]
-    fn draws_inline_at_the_prompt_without_replacing_terminal_history() -> io::Result<()> {
+    fn draws_inline_at_the_prompt_without_replacing_terminal_history()
+    -> Result<(), std::convert::Infallible> {
         use ratatui::backend::{Backend, TestBackend};
         use ratatui::{Terminal, TerminalOptions, Viewport};
 
