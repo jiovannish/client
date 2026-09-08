@@ -13,8 +13,10 @@ curl -fsSL https://github.com/jiovannish/client/releases/latest/download/install
 
 The installer verifies the archive's SHA-256 checksum and replaces only the CLI binary. It
 does not change API keys, VM keys, shell startup files or saved configuration.
-The default location is `~/.local/bin/jio`; add `~/.local/bin` to `PATH` if needed.
-License notices are installed under `~/.local/share/jio`.
+The installer uses `~/.local/bin` when it is on `PATH`, otherwise `/usr/local/bin`
+when writable or accessible with passwordless sudo. If neither is available, it
+uses `~/.local/bin` and prints an `export PATH=...` command. License notices are
+installed under `../share/jio` relative to the install directory.
 
 Native binaries: macOS ARM64 and Intel (11+), Linux ARM64 and x86-64 (glibc 2.35+).
 OpenSSH (`ssh` and `ssh-keygen`) is required for VM access. Windows and Alpine/musl

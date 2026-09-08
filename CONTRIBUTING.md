@@ -32,5 +32,4 @@ To build the Node.js SDK, run `npm ci`, `npm run build:node`, and
 `npm run test:node`. To install the Python SDK, run
 `python -m pip install ./bindings/python`. Examples are in [examples/](examples/).
 
-Keep user documentation in [docs/](docs/README.md) and record changes to durable
-contracts in [docs/adr/](docs/adr/).
+Keep user documentation in [docs/](docs/README.md).

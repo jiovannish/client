@@ -9,8 +9,14 @@ curl -fsSL https://github.com/jiovannish/client/releases/latest/download/install
 ```
 
 The installer selects your platform, verifies the archive's SHA-256 checksum,
-and installs `jio` in `~/.local/bin`. No Rust, Node.js, or sudo is needed.
-Release downloads require access to the GitHub repository while it is private.
+and installs `jio` in `~/.local/bin` if that directory is on your `PATH`.
+Otherwise it uses `/usr/local/bin` when that directory is on `PATH` and writable,
+or when passwordless sudo is available (as in Jio's Ubuntu VMs). This makes `jio`
+available immediately in the same shell. No Rust or Node.js is needed.
+
+If neither option is available, it installs in `~/.local/bin` and prints the exact
+`export PATH=...` command to run. A piped script cannot change its parent shell's
+`PATH`. Custom `JIO_INSTALL_DIR` locations are always respected.
 
 Supported platforms: macOS 11+ and Linux with glibc 2.35+, on ARM64 and x86-64.
 Windows and Alpine/musl are not supported. VM access requires `ssh` and
@@ -154,5 +160,4 @@ and relies on the VM and its trusted host operator for isolation.
 Run `jio --help` or `jio <command> --help`. Use `jio completion zsh`,
 `jio completion bash`, or `jio completion fish` for shell completion setup.
 
-See [limitations](limitations.md), [contributing](../CONTRIBUTING.md), and
-[architecture decisions](adr/) for more detail.
+See [limitations](limitations.md) and [contributing](../CONTRIBUTING.md) for more detail.

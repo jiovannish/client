@@ -28,7 +28,7 @@ if (asset !== 'SHA256SUMS' && asset !== 'jio-' + process.env.TEST_TARGET + '.tar
 copyFileSync(process.env.TEST_FIXTURE + '/' + (asset === 'SHA256SUMS' ? 'checksums' : 'archive'), args[args.indexOf('--output') + 1]);
 `, { mode: 0o755 });
   const env = { ...process.env, PATH: `${stub}:${process.env.PATH}`, JIO_INSTALL_DIR: bin, TEST_FIXTURE: fixture };
-  const run = (extra = {}) => spawnSync('sh', [installer], { env: { ...env, ...extra }, encoding: 'utf8' });
+  const run = (extra = {}) => spawnSync('sh', [], { input: readFileSync(installer, 'utf8'), env: { ...env, ...extra }, encoding: 'utf8' });
   const archive = (version = '0.1.0') => {
     writeFileSync(join(files, 'jio'), `#!/bin/sh\n[ "$1" = --version ] || exit 1\necho 'jio ${version}'\n`, { mode: 0o755 });
     writeFileSync(join(files, 'LICENSE'), 'test license\n');
@@ -49,6 +49,25 @@ copyFileSync(process.env.TEST_FIXTURE + '/' + (asset === 'SHA256SUMS' ? 'checksu
     assert.equal(result.status, 0, result.stderr);
     assert.equal(execFileSync(join(bin, 'jio'), ['--version'], { encoding: 'utf8' }), 'jio 0.1.0\n');
   }
+  // A piped child cannot change its parent's PATH: verify lookup in that parent.
+  const home = join(fixture, "user's home");
+  const localBin = join(home, '.local', 'bin');
+  const parentEnv = { ...env, HOME: home, JIO_INSTALL_DIR: undefined,
+    PATH: `${stub}:${localBin}:/usr/bin:/bin:/usr/sbin:/sbin` };
+  const parent = spawnSync('sh', ['-ec', 'sh; command -v jio; jio --version'], {
+    input: readFileSync(installer, 'utf8'), env: parentEnv, encoding: 'utf8',
+  });
+  assert.equal(parent.status, 0, parent.stderr);
+  assert.ok(parent.stdout.includes(localBin + '/jio'));
+  // If no installable directory is on PATH, the printed recovery command must work.
+  const fallbackEnv = { ...parentEnv, PATH: `${stub}:/usr/bin:/bin:/usr/sbin:/sbin` };
+  const fallback = run(fallbackEnv);
+  assert.equal(fallback.status, 0, fallback.stderr);
+  const exportLine = fallback.stdout.split('\n').find(line => line.startsWith('  export PATH='));
+  assert.ok(exportLine);
+  const recovered = spawnSync('sh', ['-ec', exportLine + '; jio --version'], { env: fallbackEnv, encoding: 'utf8' });
+  assert.equal(recovered.status, 0, recovered.stderr);
+  assert.equal(recovered.stdout, 'jio 0.1.0\n');
   const installed = readFileSync(join(bin, 'jio'));
   const failsSafely = (extra = {}) => {
     const result = run(extra);

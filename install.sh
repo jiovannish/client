@@ -13,7 +13,7 @@ install_jio() (
         Linux/x86_64) target=x86_64-unknown-linux-gnu ;;
         *) echo 'Jio supports macOS and glibc Linux on ARM64 or x86-64.' >&2; exit 1 ;;
     esac
-    for command in curl tar awk; do
+    for command in curl tar awk install; do
         command -v "$command" >/dev/null || { echo "Missing requirement: $command" >&2; exit 1; }
     done
     if command -v sha256sum >/dev/null; then
@@ -26,6 +26,23 @@ install_jio() (
     fi
 
     install_dir=${JIO_INSTALL_DIR:-${HOME:?HOME or JIO_INSTALL_DIR is required}/.local/bin}
+    use_sudo=0
+    if [ -z "${JIO_INSTALL_DIR:-}" ]; then
+        case ":${PATH:-}:" in
+            *":$install_dir:"*) ;;
+            *:/usr/local/bin:*)
+                if [ -w /usr/local/bin ]; then
+                    install_dir=/usr/local/bin
+                elif command -v sudo >/dev/null && sudo -n true 2>/dev/null; then
+                    install_dir=/usr/local/bin
+                    use_sudo=1
+                fi
+                ;;
+        esac
+    fi
+    install_command() {
+        if [ "$use_sudo" -eq 1 ]; then sudo -n "$@"; else "$@"; fi
+    }
     case "$install_dir" in
         /*) ;;
         *) echo 'JIO_INSTALL_DIR must be an absolute path.' >&2; exit 1 ;;
@@ -34,9 +51,10 @@ install_jio() (
         echo "Refusing to replace a symlink or non-file: $install_dir/jio" >&2
         exit 1
     fi
-    mkdir -p "$install_dir"
-    temporary=$(mktemp -d "$install_dir/.jio-install.XXXXXXXX")
-    trap 'rm -f "$temporary/archive" "$temporary/checksums" "$temporary/jio" "$temporary/LICENSE" "$temporary/THIRDPARTY.json"; rmdir "$temporary"' EXIT
+    install_command mkdir -p "$install_dir"
+    temporary=$(mktemp -d "${TMPDIR:-/tmp}/jio-install.XXXXXXXX")
+    staged=
+    trap '[ -z "$staged" ] || install_command rm -f "$staged"; rm -f "$temporary/archive" "$temporary/checksums" "$temporary/jio" "$temporary/LICENSE" "$temporary/THIRDPARTY.json"; rmdir "$temporary"' EXIT
     trap 'exit 1' HUP INT TERM
 
     asset=jio-$target.tar.gz
@@ -69,14 +87,23 @@ install_jio() (
         exit 1
     }
     license_dir=$install_dir/../share/jio
-    mkdir -p "$license_dir"
-    cp "$temporary/LICENSE" "$temporary/THIRDPARTY.json" "$license_dir/"
-    # Same filesystem: an interrupted update does not truncate the previous binary.
-    mv -f "$temporary/jio" "$install_dir/jio"
+    install_command mkdir -p "$license_dir"
+    install_command install -m 644 "$temporary/LICENSE" "$temporary/THIRDPARTY.json" "$license_dir/"
+    # Stage on the destination filesystem so replacement stays atomic.
+    staged=$(install_command mktemp "$install_dir/.jio.XXXXXXXX")
+    install_command install -m 755 "$temporary/jio" "$staged"
+    install_command mv -f "$staged" "$install_dir/jio"
+    staged=
     echo "Installed Jio $version at $install_dir/jio"
     case ":${PATH:-}:" in
         *":$install_dir:"*) ;;
-        *) echo "Add $install_dir to your shell's PATH to run jio." ;;
+        *)
+            echo 'To run jio in this shell, copy and run:'
+            # POSIX shell quoting, including custom paths containing apostrophes.
+            quoted_dir=$(printf '%s' "$install_dir" | sed "s/'/'\\\\''/g")
+            printf "  export PATH='%s':\$PATH\n" "$quoted_dir"
+            echo 'Add the same line to your shell configuration for future sessions.'
+            ;;
     esac
     echo 'OpenSSH (ssh and ssh-keygen) is required to connect to VMs.'
     echo 'Your API key, VM keys and saved configuration were not changed.'

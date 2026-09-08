@@ -3,3 +3,5 @@
 *.node
 *.so
 __pycache__/
+
+/docs/adr/

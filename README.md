@@ -20,7 +20,7 @@ jio create
 jio connect
 ```
 
-Installs to `~/.local/bin`; add it to your `PATH` if needed. Requires OpenSSH.
+The installer chooses a location on `PATH` when available. Requires OpenSSH.
 See [installation](docs/README.md#installation) for supported platforms and updates.
 
 ## Documentation
