@@ -201,8 +201,8 @@ the user's default Codex profile.
 - The native API and SDKs are experimental and do not yet carry a compatibility
   promise.
 - The npm and Python package names are buildable locally but are not configured
-  for public registry release until their namespace and repository license are
-  decided.
+  for public registry release until their namespace and cross-platform packaging
+  are finalized.
 
 ## Validation
 
@@ -214,3 +214,8 @@ cargo doc --workspace --no-deps
 npm run build:node
 npm run test:node
 ```
+
+## License
+
+Copyright 2026 Jio contributors. Licensed under [Apache-2.0](LICENSE).
+Third-party dependencies retain their own licenses.

@@ -2,6 +2,7 @@
   "name": "@jio/sdk",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "description": "Node.js and TypeScript SDK for programmable Jio microVM sessions",
   "main": "index.js",
   "types": "index.d.ts",

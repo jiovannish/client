@@ -1,6 +1,7 @@
 {
   "name": "jio-client-monorepo",
   "private": true,
+  "license": "Apache-2.0",
   "workspaces": [
     "bindings/node"
   ],
