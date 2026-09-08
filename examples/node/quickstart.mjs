@@ -1,7 +1,6 @@
 import { Jio } from "@jio/sdk";
 
 const jio = new Jio({
-  endpoint: process.env.JIO_ENDPOINT,
   apiKey: process.env.JIO_API_KEY,
 });
 const vm = await jio.create();

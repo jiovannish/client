@@ -18,16 +18,21 @@ send command input, read and write bounded files, stop it cleanly, start the
 same files as a new VM generation, inspect or reattach it, and explicitly
 destroy it.
 
-Set an API key and either an SSH host for standalone Core or a loopback URL when
-the program runs on the Core host:
+Set your Jio API key. The connection and public TLS certificate are built in:
 
 ```sh
 export JIO_API_KEY='replace-with-a-32-byte-or-longer-key'
-export JIO_ENDPOINT='ubuntu@jio-host'
+jio usage
+jio create
 ```
 
-`JIO_HOST` remains a compatibility alias for `JIO_ENDPOINT`.
-`JIO_CA_CERT` can supply a custom public CA certificate for hosted HTTPS access.
+No address or certificate path is needed. TLS and guest SSH identity verification
+remain enabled. A fresh CLI selects Large (4 vCPU / 8 GiB), the currently available
+size. Existing choices are preserved; change them with `jio config` if needed.
+
+For development, explicit connection options and `JIO_ENDPOINT` (or its legacy
+alias `JIO_HOST`) still override the default. `JIO_CA_CERT` can supply a custom
+public CA certificate. Invalid overrides fail instead of silently falling back.
 
 The CLI commands and SDK interfaces are unchanged. A hosted VM handle reuses one
 authenticated SSH connection for exec/file/terminal calls. Independent CLI
@@ -97,9 +102,9 @@ The current implementation uses the same SSH transport as the SDK; the command
 interface does not depend on that transport remaining SSH.
 
 ```sh
-export JIO_ENDPOINT='ubuntu@jio-host'
 export JIO_API_KEY='replace-with-a-32-byte-or-longer-key'
 
+jio usage
 session="$(cargo run --quiet --release -p jio-cli -- create)"
 cargo run --quiet --release -p jio-cli -- \
   exec "$session" 'cat /etc/os-release' --timeout 30
@@ -177,6 +182,8 @@ the user's default Codex profile.
   recovery of running services are not supported.
 - The current standalone transport requires OpenSSH (`ssh` and `ssh-keygen`) on
   a macOS or Linux client.
+- The legacy one-shot `jio run` artifact API is not available on the default
+  Jio connection; use `jio create` and `jio exec`.
 - A command timeout terminates the local SSH process; it is not a durable guest
   process-cancellation protocol.
 - The native API and SDKs are experimental and do not yet carry a compatibility

@@ -23,7 +23,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            size: VmSize::Small,
+            size: VmSize::Large,
         }
     }
 }
@@ -424,11 +424,11 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_small_and_round_trips_each_size_privately() -> io::Result<()> {
+    fn defaults_to_large_and_round_trips_each_size_privately() -> io::Result<()> {
         let directory = TestDirectory::new()?;
         let store = ConfigStore::at(directory.path());
         assert_eq!(store.load()?, Config::default());
-        assert_eq!(store.load()?.size, VmSize::Small);
+        assert_eq!(store.load()?.size, VmSize::Large);
         for size in VmSize::ALL {
             store.save(Config { size })?;
             assert_eq!(store.load()?.size, size);

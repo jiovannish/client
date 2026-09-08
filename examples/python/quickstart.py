@@ -4,7 +4,6 @@ from jio import Jio
 
 
 jio = Jio(
-    endpoint=os.environ["JIO_ENDPOINT"],
     api_key=os.environ["JIO_API_KEY"],
 )
 vm = jio.create()

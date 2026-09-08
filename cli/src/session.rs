@@ -298,16 +298,15 @@ fn require_success(operation: &str, result: &CommandResult) -> io::Result<()> {
 }
 
 pub fn host(value: Option<OsString>) -> io::Result<String> {
-    value
-        .map(|value| {
-            value
-                .into_string()
-                .map_err(|_| invalid("host is not UTF-8"))
-        })
-        .transpose()?
-        .or_else(|| env::var("JIO_ENDPOINT").ok())
-        .or_else(|| env::var("JIO_HOST").ok())
-        .ok_or_else(|| invalid("missing --host <host> (or JIO_ENDPOINT/JIO_HOST)"))
+    jio_client::resolve_endpoint(
+        value
+            .map(|value| {
+                value
+                    .into_string()
+                    .map_err(|_| invalid("host is not UTF-8"))
+            })
+            .transpose()?,
+    )
 }
 
 fn invalid(message: impl ToString) -> io::Error {

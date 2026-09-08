@@ -26,7 +26,7 @@ impl Gateway {
             cancel: None,
             relay: None,
         };
-        let ca = crate::custom_ca()?;
+        let ca = crate::custom_ca(owner.api.endpoint())?;
         let endpoint = format!(
             "{}/v0/sessions/{}/ssh",
             owner.api.endpoint(),

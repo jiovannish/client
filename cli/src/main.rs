@@ -584,9 +584,7 @@ fn run_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invo
     if is_help(&source) {
         return Ok(Invocation::Help(RUN_USAGE));
     }
-    let mut host = env::var("JIO_ENDPOINT")
-        .ok()
-        .or_else(|| env::var("JIO_HOST").ok());
+    let mut host = None;
     let mut instances = 1;
     let mut concurrency = None;
     let mut language = None;
@@ -613,12 +611,7 @@ fn run_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invo
         }
     }
 
-    let host = host.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "missing --host <user@address|https://url> (or JIO_ENDPOINT/JIO_HOST)",
-        )
-    })?;
+    let host = session::host(host.map(OsString::from))?;
     if !(1..=jio_client::MAX_INSTANCES).contains(&instances) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

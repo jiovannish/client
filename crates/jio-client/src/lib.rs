@@ -32,9 +32,26 @@ const MAX_RESPONSE: u64 = 8 * 1024 * 1024;
 const DEFAULT_ENDPOINT_PORT: u16 = 8080;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const CREATE_SESSION_TIMEOUT: Duration = Duration::from_secs(310);
+/// Default managed Jio connection. API keys are always supplied separately.
+pub const DEFAULT_ENDPOINT: &str = "https://46.105.119.217";
+const JIO_CA: &[u8] = include_bytes!("jio-ca.pem");
 const SSH_ED25519_PREFIX: &[u8] = b"ssh-ed25519 ";
 const SSH_ED25519_BASE64_BYTES: usize = 68;
 const SSH_ED25519_BLOB_BYTES: usize = 51;
+
+/// Resolves an explicit connection, environment overrides, or the built-in Jio default.
+pub fn resolve_endpoint(explicit: Option<String>) -> io::Result<String> {
+    let value = explicit
+        .map(std::ffi::OsString::from)
+        .or_else(|| env::var_os("JIO_ENDPOINT"))
+        .or_else(|| env::var_os("JIO_HOST"))
+        .unwrap_or_else(|| DEFAULT_ENDPOINT.into());
+    normalize_endpoint(
+        value
+            .into_string()
+            .map_err(|_| invalid("Jio connection is not valid UTF-8"))?,
+    )
+}
 
 /// A fixed Jio VM resource profile.
 ///
@@ -914,7 +931,7 @@ pub fn run(request: &RunRequest, mut emit: impl FnMut(Event) -> io::Result<()>) 
     let workload = read_workload(&request.workload)?;
     let digest = format!("{:x}", Sha256::digest(&workload));
 
-    emit(Event::Phase(format!("Connecting to {}", request.endpoint)))?;
+    emit(Event::Phase("Connecting to Jio".into()))?;
     let connection =
         Connection::open(&request.endpoint, &request.api_key, DEFAULT_REQUEST_TIMEOUT)?;
 
@@ -976,7 +993,7 @@ impl Connection {
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(5))
             .timeout(timeout);
-        if let Some(ca) = custom_ca()? {
+        if let Some(ca) = custom_ca(endpoint)? {
             builder = builder.add_root_certificate(ca);
         }
         let client = builder.build().map_err(other)?;
@@ -1051,9 +1068,25 @@ impl Connection {
     }
 }
 
-fn custom_ca() -> io::Result<Option<reqwest::Certificate>> {
-    let Some(path) = env::var_os("JIO_CA_CERT") else {
-        return Ok(None);
+fn custom_ca(endpoint: &str) -> io::Result<Option<reqwest::Certificate>> {
+    connection_ca(endpoint, env::var_os("JIO_CA_CERT").as_deref())
+}
+
+fn connection_ca(
+    endpoint: &str,
+    path: Option<&std::ffi::OsStr>,
+) -> io::Result<Option<reqwest::Certificate>> {
+    let Some(path) = path else {
+        // Do not extend private Jio trust to custom destinations.
+        return if reqwest::Url::parse(endpoint)
+            .is_ok_and(|url| url.as_str().trim_end_matches('/') == DEFAULT_ENDPOINT)
+        {
+            reqwest::Certificate::from_pem(JIO_CA)
+                .map(Some)
+                .map_err(other)
+        } else {
+            Ok(None)
+        };
     };
     let mut bytes = Vec::new();
     File::open(path)?
@@ -1306,6 +1339,41 @@ fn other(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn built_in_trust_is_scoped_and_explicit_connections_are_validated() -> std::io::Result<()> {
+        use super::{DEFAULT_ENDPOINT, JIO_CA, connection_ca, resolve_endpoint};
+        for endpoint in [
+            DEFAULT_ENDPOINT.to_owned(),
+            format!("{DEFAULT_ENDPOINT}/"),
+            format!("{DEFAULT_ENDPOINT}:443"),
+        ] {
+            assert!(connection_ca(&endpoint, None)?.is_some());
+        }
+        for endpoint in [
+            "https://example.com".to_owned(),
+            format!("{DEFAULT_ENDPOINT}:444"),
+            format!("{DEFAULT_ENDPOINT}.example.com"),
+            "http://127.0.0.1".into(),
+        ] {
+            assert!(connection_ca(&endpoint, None)?.is_none());
+        }
+        let pem = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/jio-ca.pem");
+        assert!(connection_ca("https://example.com", Some(pem.as_os_str()))?.is_some());
+        assert!(connection_ca(DEFAULT_ENDPOINT, Some(pem.join("missing").as_os_str())).is_err());
+        assert_eq!(
+            resolve_endpoint(Some("http://127.0.0.1:8080/".into()))?,
+            "http://127.0.0.1:8080"
+        );
+        assert!(resolve_endpoint(Some(String::new())).is_err());
+        assert!(resolve_endpoint(Some("http://example.com".into())).is_err());
+        use sha2::Digest;
+        assert_eq!(
+            format!("{:x}", sha2::Sha256::digest(JIO_CA)),
+            "9d00fd58f0f7dfec8499462faa825e8d06c256f8d36a201e5af15c91dd0d6bf5"
+        );
+        Ok(())
+    }
+
     #[test]
     fn usage_uses_authenticated_hosted_route_and_rejects_invalid_responses() -> std::io::Result<()>
     {

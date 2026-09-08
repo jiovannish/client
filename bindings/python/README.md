@@ -9,7 +9,6 @@ import os
 from jio import Jio
 
 jio = Jio(
-    endpoint=os.environ["JIO_ENDPOINT"],
     api_key=os.environ["JIO_API_KEY"],
 )
 vm = jio.create()
@@ -28,6 +27,8 @@ finally:
 ```
 
 `AsyncJio` exposes the same operations without blocking an asyncio event loop.
+The Jio connection and public TLS certificate are built in; only an API key is
+needed. Stop/start is unavailable for 30-minute friend sessions.
 The current experimental transport supports macOS and Linux clients with
 OpenSSH installed. Standalone Core currently admits one operator-selected
 template; this client does not assume a guest language runtime.

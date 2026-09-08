@@ -8,7 +8,6 @@ file operations.
 import { Jio } from "@jio/sdk";
 
 const jio = new Jio({
-  endpoint: process.env.JIO_ENDPOINT,
   apiKey: process.env.JIO_API_KEY,
 });
 const vm = await jio.create();
@@ -25,6 +24,9 @@ try {
   await vm.destroy();
 }
 ```
+
+The Jio connection and public TLS certificate are built in; only an API key is
+needed. Stop/start is unavailable for 30-minute friend sessions.
 
 The current experimental transport supports macOS and Linux clients with
 OpenSSH installed. Standalone Core currently admits one operator-selected

@@ -88,8 +88,8 @@ impl JsJio {
             api_key: None,
             state_dir: None,
         });
-        let endpoint = configured(options.endpoint, "JIO_ENDPOINT", Some("JIO_HOST"))?;
-        let api_key = configured(options.api_key, "JIO_API_KEY", None)?;
+        let endpoint = jio_client::resolve_endpoint(options.endpoint).map_err(to_node_error)?;
+        let api_key = configured(options.api_key, "JIO_API_KEY")?;
         let inner = match options.state_dir {
             Some(directory) => {
                 VmClient::with_state_directory(endpoint, api_key, PathBuf::from(directory))
@@ -534,11 +534,7 @@ fn state_name(state: SessionState) -> &'static str {
     }
 }
 
-fn configured(
-    explicit: Option<String>,
-    variable: &str,
-    legacy_variable: Option<&str>,
-) -> Result<String> {
+fn configured(explicit: Option<String>, variable: &str) -> Result<String> {
     if let Some(value) = explicit {
         return Ok(value);
     }
@@ -551,18 +547,6 @@ fn configured(
             ));
         }
         Err(env::VarError::NotPresent) => {}
-    }
-    if let Some(legacy_variable) = legacy_variable {
-        match env::var(legacy_variable) {
-            Ok(value) => return Ok(value),
-            Err(env::VarError::NotUnicode(_)) => {
-                return Err(Error::new(
-                    Status::InvalidArg,
-                    format!("{legacy_variable} is not valid UTF-8"),
-                ));
-            }
-            Err(env::VarError::NotPresent) => {}
-        }
     }
     Err(Error::new(
         Status::InvalidArg,

@@ -27,8 +27,8 @@ impl PyJio {
         api_key: Option<String>,
         state_dir: Option<String>,
     ) -> PyResult<Self> {
-        let endpoint = configured(endpoint, "JIO_ENDPOINT", Some("JIO_HOST"))?;
-        let api_key = configured(api_key, "JIO_API_KEY", None)?;
+        let endpoint = jio_client::resolve_endpoint(endpoint).map_err(to_python_error)?;
+        let api_key = configured(api_key, "JIO_API_KEY")?;
         let inner = match state_dir {
             Some(directory) => {
                 VmClient::with_state_directory(endpoint, api_key, PathBuf::from(directory))
@@ -91,7 +91,7 @@ impl PyJio {
     }
 
     fn __repr__(&self) -> String {
-        format!("Jio(endpoint={:?})", self.inner.endpoint())
+        "Jio()".into()
     }
 }
 
@@ -356,11 +356,7 @@ fn state_name(state: SessionState) -> &'static str {
     }
 }
 
-fn configured(
-    explicit: Option<String>,
-    variable: &str,
-    legacy_variable: Option<&str>,
-) -> PyResult<String> {
+fn configured(explicit: Option<String>, variable: &str) -> PyResult<String> {
     if let Some(value) = explicit {
         return Ok(value);
     }
@@ -372,17 +368,6 @@ fn configured(
             )));
         }
         Err(env::VarError::NotPresent) => {}
-    }
-    if let Some(legacy_variable) = legacy_variable {
-        match env::var(legacy_variable) {
-            Ok(value) => return Ok(value),
-            Err(env::VarError::NotUnicode(_)) => {
-                return Err(PyValueError::new_err(format!(
-                    "{legacy_variable} is not valid UTF-8"
-                )));
-            }
-            Err(env::VarError::NotPresent) => {}
-        }
     }
     Err(PyValueError::new_err(format!("{variable} is required")))
 }
