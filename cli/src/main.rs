@@ -28,7 +28,8 @@ const USAGE: &str = concat!(
     "  destroy   [session-id] [options]                 Delete the VM and retained files\n",
     "  login     <agent> [session-id] [options]         Use local agent login in a VM\n",
     "  yolo      <agent> [session-id] [options]         Open an agent with full VM access\n",
-    "  completion <shell>                               Print shell completion setup",
+    "  completion <shell>                               Print shell completion setup\n",
+    "  --version                                        Print the installed version",
 );
 
 const RUN_USAGE: &str = concat!(
@@ -454,6 +455,12 @@ fn options() -> io::Result<Invocation> {
 
 fn options_from(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invocation> {
     match arguments.next().as_deref() {
+        Some(command) if command == OsStr::new("--version") || command == OsStr::new("-V") => {
+            if arguments.next().is_some() {
+                return Err(usage(USAGE));
+            }
+            Ok(Invocation::Help(concat!("jio ", env!("CARGO_PKG_VERSION"))))
+        }
         Some(command) if is_help(command) => Ok(Invocation::Help(USAGE)),
         Some(command) if command == OsStr::new("run") => run_options(arguments),
         Some(command) if command == OsStr::new("create") => {
