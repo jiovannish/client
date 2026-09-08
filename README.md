@@ -102,6 +102,25 @@ cargo run --quiet --release -p jio-cli -- start "$session"
 cargo run --quiet --release -p jio-cli -- destroy "$session" --yes
 ```
 
+`jio config` opens a compact inline size picker without clearing terminal history.
+Enter opens `Size`, the up and
+down arrows move between the fixed profiles, Enter saves the choice, and
+Backspace or Escape goes back or exits. The selected value is stored privately
+in `~/.jio/config` (or `$JIO_STATE_DIR/config`) and is used by later
+`jio create` calls:
+
+| Size | vCPUs | RAM |
+| --- | ---: | ---: |
+| Small | 1 | 512 MiB |
+| Medium | 2 | 4 GiB |
+| Large | 4 | 8 GiB |
+| X-Large | 8 | 16 GiB |
+
+The client sends a size only when Core advertises a compatible size catalog in
+its health response. Small remains compatible with existing fixed-template
+endpoints; selecting another size against one of those endpoints fails before
+session creation instead of sending it an unknown request field.
+
 When run from a terminal, `jio create` asks whether to enter the VM immediately.
 When its output is redirected, it prints only the session ID for scripts.
 Successful `create` and `connect` commands also select that VM as the current
@@ -136,9 +155,10 @@ the user's default Codex profile.
 
 ## Explicit limitations
 
-- Standalone Core currently admits one operator-selected template; clients do
-  not select a runtime per session, and the client does not assume a guest
-  language runtime.
+- Standalone Core currently admits one operator-selected template. The CLI can
+  persist a preferred size, but non-Small creation requires an endpoint that
+  advertises per-session size selection. Clients do not select a language
+  runtime per session or assume one exists in the guest.
 - Clean stop/start preserves the workspace and the configured ordinary system
   roots. Core-process restart, outer-host restart, process checkpoints, and
   recovery of running services are not supported.

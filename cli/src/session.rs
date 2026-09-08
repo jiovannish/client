@@ -1,4 +1,4 @@
-use jio_client::{CommandResult, PreparedConnection, Session, VmClient};
+use jio_client::{CommandResult, PreparedConnection, Session, VmClient, VmSize};
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -37,16 +37,20 @@ const INSTALL_CODEX_AUTH: &str = concat!(
     "trap - 0 1 2 15",
 );
 
-pub fn create(host: String) -> io::Result<Session> {
+pub fn create(host: String, size: VmSize) -> io::Result<Session> {
     let client = client(host)?;
-    let session = client.create()?.session();
+    let session = client.create_with_size(size)?.session();
     client.set_current_session_id(&session.session_id)?;
     Ok(session)
 }
 
-pub fn accept_create_and_report_id(host: String, report: impl FnOnce(&str)) -> io::Result<String> {
+pub fn accept_create_and_report_id(
+    host: String,
+    size: VmSize,
+    report: impl FnOnce(&str),
+) -> io::Result<String> {
     let client = client(host)?;
-    let id = client.accept_create_and_report_id(report)?;
+    let id = client.accept_create_with_size_and_report_id(size, report)?;
     client.set_current_session_id(&id)?;
     Ok(id)
 }

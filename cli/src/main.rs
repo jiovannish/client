@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod runner;
 mod session;
 
@@ -17,6 +18,7 @@ const USAGE: &str = concat!(
     "  Command   Arguments\n",
     "  run       <source> [options]                     Run source code in Jio\n",
     "  create    [options]                              Create a persistent VM\n",
+    "  config                                           Configure Jio defaults\n",
     "  exec      <session-id> <command> [options]       Run a command in a VM\n",
     "  connect   [session-id] [options]                 Open an interactive shell\n",
     "  stop      <session-id> [options]                 Stop compute and retain files\n",
@@ -41,6 +43,12 @@ const CREATE_USAGE: &str = concat!(
     "usage: jio create [options]\n",
     "\n",
     "  --host <host>              Override JIO_ENDPOINT or JIO_HOST",
+);
+
+const CONFIG_USAGE: &str = concat!(
+    "usage: jio config\n",
+    "\n",
+    "Interactively choose the default VM size used by jio create.",
 );
 
 const EXEC_USAGE: &str = concat!(
@@ -121,7 +129,7 @@ fi
 
 _jio() {
   local -a commands agents shells options
-  commands=(run create exec connect stop start destroy login yolo completion)
+  commands=(run create config exec connect stop start destroy login yolo completion)
   agents=(codex)
   shells=(zsh bash fish)
 
@@ -143,6 +151,9 @@ _jio() {
         compadd -- $shells
         return
       fi
+      options=(--help -h)
+      ;;
+    config)
       options=(--help -h)
       ;;
     run)
@@ -171,7 +182,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
   command="${COMP_WORDS[1]}"
 
   if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=($(compgen -W 'run create exec connect stop start destroy login yolo completion' -- "$current"))
+    COMPREPLY=($(compgen -W 'run create config exec connect stop start destroy login yolo completion' -- "$current"))
     return
   fi
   if [[ $COMP_CWORD -eq 2 && ( $command == login || $command == yolo ) ]]; then
@@ -184,6 +195,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
   fi
 
   case "$command" in
+    config)    COMPREPLY=($(compgen -W '--help -h' -- "$current")) ;;
     run)       COMPREPLY=($(compgen -W '--language --instances --concurrency --host --help -h' -- "$current")) ;;
     exec)      COMPREPLY=($(compgen -W '--timeout --host --help -h' -- "$current")) ;;
     destroy)   COMPREPLY=($(compgen -W '--yes --host --help -h' -- "$current")) ;;
@@ -195,7 +207,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
 complete -F _jio_completion jio"#;
 
 const FISH_COMPLETION: &str = r#"complete -c jio -f
-complete -c jio -n '__fish_use_subcommand' -a 'run create exec connect stop start destroy login yolo completion'
+complete -c jio -n '__fish_use_subcommand' -a 'run create config exec connect stop start destroy login yolo completion'
 complete -c jio -n '__fish_seen_subcommand_from login yolo; and test (count (commandline -opc)) -eq 2' -a codex
 complete -c jio -n '__fish_seen_subcommand_from completion; and test (count (commandline -opc)) -eq 2' -a 'zsh bash fish'
 complete -c jio -n '__fish_seen_subcommand_from run' -l language -l instances -l concurrency -l host
@@ -214,6 +226,7 @@ enum Invocation {
     Create {
         host: String,
     },
+    Config,
     Connect {
         host: String,
         id: Option<String>,
@@ -280,6 +293,7 @@ fn execute(invocation: Invocation) -> io::Result<()> {
             concurrency,
         } => app::run(source, host, instances, concurrency),
         Invocation::Create { host } => create(host),
+        Invocation::Config => config::run(),
         Invocation::Connect { host, id } => session::connect(host, id.as_deref()),
         Invocation::Exec {
             host,
@@ -332,8 +346,9 @@ fn execute(invocation: Invocation) -> io::Result<()> {
 }
 
 fn create(host: String) -> io::Result<()> {
+    let size = config::load()?.size;
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        println!("{}", session::create(host)?.session_id);
+        println!("{}", session::create(host, size)?.session_id);
         return Ok(());
     }
 
@@ -343,7 +358,7 @@ fn create(host: String) -> io::Result<()> {
     let create_host = host.clone();
     thread::spawn(move || {
         let mut id_reported = false;
-        let accepted = session::accept_create_and_report_id(create_host.clone(), |id| {
+        let accepted = session::accept_create_and_report_id(create_host.clone(), size, |id| {
             id_reported = true;
             let _ = report_id.send(Ok(id.to_owned()));
         });
@@ -420,6 +435,7 @@ fn options_from(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
         Some(command) if is_help(command) => Ok(Invocation::Help(USAGE)),
         Some(command) if command == OsStr::new("run") => run_options(arguments),
         Some(command) if command == OsStr::new("create") => create_options(arguments),
+        Some(command) if command == OsStr::new("config") => config_options(arguments),
         Some(command) if command == OsStr::new("connect") => connect_options(arguments),
         Some(command) if command == OsStr::new("exec") => exec_options(arguments),
         Some(command) if command == OsStr::new("stop") => {
@@ -437,6 +453,16 @@ fn options_from(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
         }
         Some(command) if command == OsStr::new("completion") => completion_options(arguments),
         _ => Err(usage(USAGE)),
+    }
+}
+
+fn config_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invocation> {
+    match arguments.next() {
+        None => Ok(Invocation::Config),
+        Some(argument) if is_help(&argument) && arguments.next().is_none() => {
+            Ok(Invocation::Help(CONFIG_USAGE))
+        }
+        Some(_) => Err(usage(CONFIG_USAGE)),
     }
 }
 
@@ -837,9 +863,9 @@ fn usage(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        COMPLETION_USAGE, CONNECT_USAGE, CREATE_USAGE, CompletionShell, DESTROY_USAGE, EXEC_USAGE,
-        Invocation, LOGIN_USAGE, RUN_USAGE, START_USAGE, STOP_USAGE, USAGE, YOLO_USAGE,
-        options_from, prompt_connect, prompt_destroy,
+        COMPLETION_USAGE, CONFIG_USAGE, CONNECT_USAGE, CREATE_USAGE, CompletionShell,
+        DESTROY_USAGE, EXEC_USAGE, Invocation, LOGIN_USAGE, RUN_USAGE, START_USAGE, STOP_USAGE,
+        USAGE, YOLO_USAGE, options_from, prompt_connect, prompt_destroy,
     };
     use std::ffi::OsString;
     use std::io::Cursor;
@@ -1033,6 +1059,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_config_without_requiring_an_endpoint() {
+        assert!(matches!(
+            options_from(["config"].into_iter().map(OsString::from)),
+            Ok(Invocation::Config)
+        ));
+        assert!(options_from(["config", "extra"].into_iter().map(OsString::from)).is_err());
+    }
+
+    #[test]
     fn bare_invocation_lists_commands_in_readable_columns() {
         let message = options_from(std::iter::empty())
             .err()
@@ -1063,6 +1098,7 @@ mod tests {
         for (command, expected) in [
             ("run", RUN_USAGE),
             ("create", CREATE_USAGE),
+            ("config", CONFIG_USAGE),
             ("exec", EXEC_USAGE),
             ("connect", CONNECT_USAGE),
             ("stop", STOP_USAGE),
