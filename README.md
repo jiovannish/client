@@ -120,6 +120,18 @@ confirmed destruction releases it. It also shows the session lifetime limit
 (30 minutes for friend accounts). These are allocations, not cumulative spend,
 host utilization or billing. Standalone Core does not expose account usage.
 
+`jio list` shows VM IDs and configured sizes for the current API key's account:
+
+```text
+VM ID                            - SIZE
+0123456789abcdef0123456789abcdef - Large · 4 vCPU · 8 GiB
+```
+
+It includes starting and stopped VMs and skips confirmed destroyed entries.
+Listing does not require local SSH keys, but connecting still does. The command
+reads all pages (up to 10,000 account records); it fails instead of silently
+returning a partial list. Standalone Core does not expose account VM listing.
+
 `jio config` opens a compact inline size picker without clearing terminal history.
 Enter opens `Size`, the up and
 down arrows move between the fixed profiles, Enter saves the choice, and

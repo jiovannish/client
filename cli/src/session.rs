@@ -44,6 +44,37 @@ pub fn usage(host: String) -> io::Result<()> {
     print_usage(&mut io::stdout().lock(), &usage)
 }
 
+pub fn list(host: String) -> io::Result<()> {
+    let api_key = env::var("JIO_API_KEY")
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "JIO_API_KEY is required"))?;
+    let vms = jio_client::SessionClient::new(host, api_key)?.list()?;
+    let mut output = io::stdout().lock();
+    print_vms(&mut output, &vms)
+}
+
+fn print_vms(output: &mut impl io::Write, vms: &[jio_client::VmSummary]) -> io::Result<()> {
+    if vms.is_empty() {
+        return writeln!(output, "No VMs.");
+    }
+    writeln!(output, "VM ID                            - SIZE")?;
+    for vm in vms {
+        let size = VmSize::ALL.into_iter().find(|size| {
+            size.vcpus() == vm.vcpu_count && u64::from(size.memory_mib()) == vm.memory_mib
+        });
+        let memory = if vm.memory_mib % 1024 == 0 {
+            format!("{} GiB", vm.memory_mib / 1024)
+        } else {
+            format!("{} MiB", vm.memory_mib)
+        };
+        write!(output, "{} - ", vm.id)?;
+        if let Some(size) = size {
+            write!(output, "{} · ", size.label())?;
+        }
+        writeln!(output, "{} vCPU · {memory}", vm.vcpu_count)?;
+    }
+    Ok(())
+}
+
 fn print_usage(output: &mut impl io::Write, usage: &jio_client::AccountUsage) -> io::Result<()> {
     writeln!(
         output,
@@ -315,6 +346,25 @@ fn invalid(message: impl ToString) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lists_vm_ids_and_configured_sizes() -> std::io::Result<()> {
+        let mut output = Vec::new();
+        super::print_vms(&mut output, &[])?;
+        assert_eq!(output, b"No VMs.\n");
+        output.clear();
+        super::print_vms(
+            &mut output,
+            &[jio_client::VmSummary {
+                id: "a".repeat(32),
+                vcpu_count: 4,
+                memory_mib: 8192,
+            }],
+        )?;
+        let text = String::from_utf8(output).map_err(std::io::Error::other)?;
+        assert!(text.contains(&format!("{} - Large · 4 vCPU · 8 GiB", "a".repeat(32))));
+        Ok(())
+    }
+
     #[test]
     fn usage_labels_reservations_and_optional_lifetime() -> std::io::Result<()> {
         use jio_client::{AccountUsage, ResourceUsage};

@@ -14,6 +14,9 @@ use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod list;
+pub use list::VmSummary;
+
 #[cfg(unix)]
 mod vm;
 
