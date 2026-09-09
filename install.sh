@@ -3,7 +3,7 @@
 # Keep execution at the end so a truncated download cannot start installation.
 install_jio() (
     set -eu
-    version=0.1.1
+    version=0.1.2
     [ "$#" -eq 0 ] || { echo 'Usage: sh install.sh (optional JIO_INSTALL_DIR)' >&2; exit 1; }
 
     case "$(uname -s)/$(uname -m)" in

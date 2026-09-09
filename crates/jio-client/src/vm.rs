@@ -1361,7 +1361,15 @@ fn generate_client_authority(directory: &Path) -> io::Result<String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()?;
+        .status()
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "could not run ssh-keygen; install OpenSSH and ensure ssh-keygen is on PATH: {error}"
+                ),
+            )
+        })?;
     if !status.success() {
         return Err(io::Error::other(format!("ssh-keygen failed with {status}")));
     }

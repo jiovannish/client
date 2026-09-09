@@ -48,6 +48,77 @@ fn no_connection_setup_is_required_but_an_api_key_still_is() -> io::Result<()> {
 
 struct TestDirectory(std::path::PathBuf);
 
+#[test]
+fn missing_openssh_reports_the_requirement_before_creating_a_vm() -> io::Result<()> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    let directory = TestDirectory::new("missing-openssh")?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let endpoint = format!("http://{}", listener.local_addr()?);
+    let mut child = directory
+        .command(&endpoint)
+        .arg("create")
+        .env("JIO_API_KEY", "a".repeat(64))
+        .env("PATH", &directory.0)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let result = (|| -> io::Result<()> {
+        let (mut stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let mut request = [0; 8192];
+        let count = stream.read(&mut request)?;
+        assert!(request[..count].starts_with(b"GET /v0/health "));
+        let body = r#"{"status":"experimental","sizes":["medium"]}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )?;
+        drop(stream);
+        while child.try_wait()?.is_none() {
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "create did not exit",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = child.kill();
+    }
+    let output = child.wait_with_output()?;
+    result?;
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("could not run ssh-keygen; install OpenSSH")
+    );
+    assert!(
+        listener
+            .accept()
+            .is_err_and(|error| error.kind() == io::ErrorKind::WouldBlock)
+    );
+    Ok(())
+}
+
 impl TestDirectory {
     fn new(name: &str) -> io::Result<Self> {
         use std::os::unix::fs::DirBuilderExt;

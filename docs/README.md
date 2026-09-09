@@ -22,6 +22,9 @@ Supported platforms: macOS 11+ and Linux with glibc 2.35+, on ARM64 and x86-64.
 Windows and Alpine/musl are not supported. VM access requires `ssh` and
 `ssh-keygen` from OpenSSH.
 
+On Arch Linux, install OpenSSH with `sudo pacman -S openssh` before running
+`jio create`. On Ubuntu/Debian, use `sudo apt install openssh-client`.
+
 If your shell cannot find `jio`, add this to your shell configuration:
 
 ```sh

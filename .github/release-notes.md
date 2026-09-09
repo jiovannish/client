@@ -1,8 +1,7 @@
-Fixes installation on Ubuntu when `~/.local/bin` is absent from the current
-shell's `PATH`. The installer selects `/usr/local/bin` when writable or available
-through passwordless sudo, so `jio` works immediately in Jio VMs. User-local and
-custom installation paths remain supported, with an explicit PATH command when
-needed. Updates the copyright notice to Saul Garcia Cespedes.
+Fixes the unclear `No such file or directory` error when `jio create` cannot
+run `ssh-keygen`. The error now names the missing command and explains that
+OpenSSH must be installed and available on `PATH`. The CLI guide includes
+installation commands for Arch Linux and Ubuntu/Debian.
 
 This remains an experimental CLI release. Account quotas, session lifetimes,
 and VM host trust requirements are unchanged.
