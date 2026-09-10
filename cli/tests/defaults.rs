@@ -103,6 +103,8 @@ fn missing_openssh_reports_the_requirement_before_creating_a_vm() -> io::Result<
                 Err(error) => return Err(error),
             }
         };
+        // Accepted sockets inherit the listener's nonblocking mode on macOS.
+        stream.set_nonblocking(false)?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         let mut request = [0; 8192];
         let count = stream.read(&mut request)?;
@@ -205,6 +207,8 @@ fn login_persists_verified_credentials_and_fails_closed() -> io::Result<()> {
                     Err(error) => return Err(error),
                 }
             };
+            // Accepted sockets inherit the listener's nonblocking mode on macOS.
+            stream.set_nonblocking(false)?;
             stream.set_read_timeout(Some(Duration::from_secs(5)))?;
             let mut reader = io::BufReader::new((&stream).take(8192));
             let mut headers = String::new();
