@@ -164,3 +164,5 @@ Run `jio --help` or `jio <command> --help`. Use `jio completion zsh`,
 `jio completion bash`, or `jio completion fish` for shell completion setup.
 
 See [limitations](limitations.md) and [contributing](../CONTRIBUTING.md) for more detail.
+
+See [publishing apps and custom domains](ports.md) for `jio expose`, `jio ports` and `jio domains`.

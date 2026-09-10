@@ -1476,7 +1476,7 @@ fn create_private_directory(path: &Path) -> io::Result<()> {
     }
 }
 
-fn temporary_directory(parent: &Path) -> io::Result<PathBuf> {
+pub(super) fn temporary_directory(parent: &Path) -> io::Result<PathBuf> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(io::Error::other)?
@@ -1502,7 +1502,7 @@ fn write_known_hosts(path: &Path, id: &str, public_key: &str) -> io::Result<()> 
     write_private_file(path, known_hosts_line(id, public_key).as_bytes())
 }
 
-fn write_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+pub(super) fn write_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1586,7 +1586,7 @@ fn require_regular(path: &Path) -> io::Result<()> {
     }
 }
 
-fn require_private_file(path: &Path) -> io::Result<()> {
+pub(super) fn require_private_file(path: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.is_file() && !metadata.file_type().is_symlink() && metadata.mode() & 0o777 == 0o600
     {
@@ -1599,7 +1599,7 @@ fn require_private_file(path: &Path) -> io::Result<()> {
     }
 }
 
-fn require_directory(path: &Path) -> io::Result<()> {
+pub(super) fn require_directory(path: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.is_dir() && !metadata.file_type().is_symlink() && metadata.mode() & 0o777 == 0o700 {
         Ok(())

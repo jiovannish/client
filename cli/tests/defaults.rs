@@ -49,6 +49,30 @@ fn no_connection_setup_is_required_but_an_api_key_still_is() -> io::Result<()> {
 struct TestDirectory(std::path::PathBuf);
 
 #[test]
+fn invalid_domain_never_contacts_the_endpoint() -> io::Result<()> {
+    let directory = TestDirectory::new("invalid-domain")?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let endpoint = format!("http://{}", listener.local_addr()?);
+    for name in ["invalid", "../example.com", "bad..example.com"] {
+        let output = directory
+            .command(&endpoint)
+            .args(["expose", "3000", &"a".repeat(32), "--domain", name])
+            .env("JIO_API_KEY", "b".repeat(64))
+            .output()?;
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("invalid DNS hostname"));
+        assert!(output.stdout.is_empty());
+        assert!(
+            listener
+                .accept()
+                .is_err_and(|error| error.kind() == io::ErrorKind::WouldBlock)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn missing_openssh_reports_the_requirement_before_creating_a_vm() -> io::Result<()> {
     use std::io::{Read, Write};
     use std::net::TcpListener;

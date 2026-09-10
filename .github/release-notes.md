@@ -1,10 +1,10 @@
-Fixes the unclear `No such file or directory` error when `jio create` cannot
-run `ssh-keygen`. The error now names the missing command and explains that
-OpenSSH must be installed and available on `PATH`. The CLI guide includes
-installation commands for Arch Linux and Ubuntu/Debian.
+Adds `jio expose`, `jio unexpose`, `jio ports` and `jio domains` for HTTP apps,
+SSE and WebSockets. A detached guest helper supports apps bound to localhost and
+keeps publication active after the local terminal closes. Custom domains use DNS
+ownership verification and automatic HTTPS, alongside the default Jio URL.
 
-This remains an experimental CLI release. Account quotas, session lifetimes,
-and VM host trust requirements are unchanged.
+Requires an ingress-enabled Server and matching Linux helper release. Stop/start
+requires republishing. This remains an experimental CLI release.
 
 ## Install
 

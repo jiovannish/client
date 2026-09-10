@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod ingress;
 mod runner;
 mod session;
 
@@ -19,6 +20,10 @@ const USAGE: &str = concat!(
     "  run       <source> [options]                     Run source code in Jio\n",
     "  create    [options]                              Create a persistent VM\n",
     "  config                                           Configure Jio defaults\n",
+    "  expose    <port> [session-id] [--domain hostname] Publish an HTTP app\n",
+    "  unexpose  <port> [session-id]                    Unpublish an app\n",
+    "  ports     [session-id]                           List published ports\n",
+    "  domains   add|status|remove                      Manage custom domains\n",
     "  usage     [options]                              Show account limits and reservations\n",
     "  list      [options]                              List VM IDs and sizes\n",
     "  exec      <session-id> <command> [options]       Run a command in a VM\n",
@@ -149,7 +154,7 @@ fi
 
 _jio() {
   local -a commands agents shells options
-  commands=(run create config usage list exec connect stop start destroy login yolo completion)
+  commands=(run create config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion)
   agents=(codex)
   shells=(zsh bash fish)
 
@@ -202,7 +207,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
   command="${COMP_WORDS[1]}"
 
   if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=($(compgen -W 'run create config usage list exec connect stop start destroy login yolo completion' -- "$current"))
+    COMPREPLY=($(compgen -W 'run create config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion' -- "$current"))
     return
   fi
   if [[ $COMP_CWORD -eq 2 && ( $command == login || $command == yolo ) ]]; then
@@ -227,7 +232,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
 complete -F _jio_completion jio"#;
 
 const FISH_COMPLETION: &str = r#"complete -c jio -f
-complete -c jio -n '__fish_use_subcommand' -a 'run create config usage list exec connect stop start destroy login yolo completion'
+complete -c jio -n '__fish_use_subcommand' -a 'run create config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion'
 complete -c jio -n '__fish_seen_subcommand_from login yolo; and test (count (commandline -opc)) -eq 2' -a codex
 complete -c jio -n '__fish_seen_subcommand_from completion; and test (count (commandline -opc)) -eq 2' -a 'zsh bash fish'
 complete -c jio -n '__fish_seen_subcommand_from run' -l language -l instances -l concurrency -l host
@@ -236,6 +241,8 @@ complete -c jio -n '__fish_seen_subcommand_from destroy' -l yes -l host
 complete -c jio -n '__fish_seen_subcommand_from usage list create connect stop start login yolo' -l host"#;
 
 enum Invocation {
+    Ingress(ingress::Options),
+    IngressHelper,
     Help(&'static str),
     Run {
         source: runner::Source,
@@ -312,6 +319,8 @@ fn main() -> ExitCode {
 
 fn execute(invocation: Invocation) -> io::Result<()> {
     match invocation {
+        Invocation::Ingress(options) => ingress::run(options),
+        Invocation::IngressHelper => jio_client::ingress::run_helper(),
         Invocation::Help(help) => {
             println!("{help}");
             Ok(())
@@ -472,6 +481,19 @@ fn options_from(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
             Ok(Invocation::Help(concat!("jio ", env!("CARGO_PKG_VERSION"))))
         }
         Some(command) if is_help(command) => Ok(Invocation::Help(USAGE)),
+        Some(command)
+            if command == OsStr::new("__ingress-helper") && arguments.next().is_none() =>
+        {
+            Ok(Invocation::IngressHelper)
+        }
+        Some(command)
+            if matches!(
+                command.to_str(),
+                Some("expose" | "unexpose" | "ports" | "domains")
+            ) =>
+        {
+            ingress::parse(command.to_str().unwrap_or_default(), arguments)
+        }
         Some(command) if command == OsStr::new("run") => run_options(arguments),
         Some(command) if command == OsStr::new("create") => {
             host_options(arguments, CREATE_USAGE, |host| Invocation::Create { host })
