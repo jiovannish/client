@@ -1,0 +1,2 @@
+# Keep embedded trust roots and release scripts identical on every platform.
+* text=auto eol=lf
