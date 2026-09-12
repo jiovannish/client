@@ -38,6 +38,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      - name: Check TypeScript tooling
+        run: |
+          bun install --frozen-lockfile --ignore-scripts
+          bun run typecheck
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Check and test the CLI
@@ -46,12 +53,17 @@ jobs:
           cargo clippy --locked -p jio-cli -p jio-client --all-targets -- -D warnings
           cargo test --locked -p jio-cli -p jio-client
           RUSTDOCFLAGS='-D warnings' cargo doc --locked -p jio-cli -p jio-client --no-deps
-          if [ "$RUNNER_OS" != Windows ]; then node scripts/test-install.mjs; fi
+          if [ "$RUNNER_OS" != Windows ]; then bun run test:installer; fi
       - name: Build and package the native binary
         run: |
           cargo build --locked --release -p jio-cli --target "$TARGET"
           cargo install --locked cargo-bundle-licenses --version 4.2.0
-          node scripts/package-cli.mjs "$TARGET"
+          bun run package:cli "$TARGET"
+      - name: Test SDK with Bun
+        if: runner.os != 'Windows'
+        run: |
+          bun run --bun --cwd bindings/node build:debug
+          bun run test:node
       - name: Test native Windows installer
         if: runner.os == 'Windows'
         shell: powershell

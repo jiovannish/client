@@ -18,7 +18,7 @@
   "scripts": {
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "test": "node --test test/*.test.js"
+    "test": "bun test test"
   },
   "napi": {
     "binaryName": "jio-sdk",

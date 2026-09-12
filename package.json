@@ -6,7 +6,15 @@
     "bindings/node"
   ],
   "scripts": {
-    "build:node": "npm run build --workspace @jio/sdk",
-    "test:node": "npm test --workspace @jio/sdk"
+    "build:node": "bun run --bun --cwd bindings/node build",
+    "test:node": "bun test bindings/node/test",
+    "typecheck": "bun run --bun tsc --noEmit",
+    "test:installer": "bun scripts/test-install.ts",
+    "package:cli": "bun scripts/package-cli.ts"
+  },
+  "packageManager": "bun@1.4.2",
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "typescript": "5.9.3"
   }
 }
