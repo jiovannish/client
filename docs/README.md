@@ -19,7 +19,8 @@ If neither option is available, it installs in `~/.local/bin` and prints the exa
 `PATH`. Custom `JIO_INSTALL_DIR` locations are always respected.
 
 Supported platforms: macOS 11+ and Linux with glibc 2.35+, on ARM64 and x86-64.
-Windows and Alpine/musl are not supported. VM access requires `ssh` and
+Windows 10/11 x64 is supported starting with v0.2.1. Alpine/musl is not
+supported. VM access requires `ssh` and
 `ssh-keygen` from OpenSSH.
 
 On Arch Linux, install OpenSSH with `sudo pacman -S openssh` before running
@@ -40,6 +41,44 @@ curl -fsSL https://github.com/jiovannish/client/releases/latest/download/install
 
 Check your version with `jio --version`. Versioned downloads and checksums are
 on the [releases page](https://github.com/jiovannish/client/releases).
+
+## Windows
+
+Native Windows support is available starting with v0.2.1. It does not require
+WSL, Git Bash, Node.js or Rust at runtime. Enable **OpenSSH Client**
+in Windows Settings → Optional features. Jio uses the Windows-provided OpenSSH
+executables in `%SystemRoot%\System32\OpenSSH`.
+
+PowerShell:
+
+```powershell
+irm https://github.com/jiovannish/client/releases/latest/download/install.ps1 | iex
+```
+
+CMD:
+
+```bat
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/jiovannish/client/releases/latest/download/install.ps1 | iex"
+```
+
+The installer verifies the checksum and binary version, installs under
+`%LOCALAPPDATA%\Jio\bin`, and adds it to your user PATH. Open a new terminal
+when installing from CMD. `JIO_INSTALL_DIR` may select another absolute local
+path. Existing configuration and VM keys are preserved.
+
+```bat
+jio login "<your-api-key>"
+jio create
+jio expose 3000
+```
+
+State lives under `%USERPROFILE%\.jio`, protected with Windows ACLs. PowerShell
+is used to verify those permissions. Interactive connections use native OpenSSH
+console handling; each command opens its own SSH connection. Windows does not
+pre-open a hidden guest shell while displaying the connect prompt.
+
+For commands passed to `jio exec`, use your local shell's quoting rules; the
+command itself runs in the Linux guest. Windows ARM64 binaries are not included.
 
 ## Login
 
@@ -147,7 +186,7 @@ Copy your local Codex login to the current VM:
 jio login codex
 ```
 
-To copy the login and open Codex in `/workspace` with approvals and sandboxing
+To copy the login and open Codex in your home directory (`/home/jio`) with approvals and sandboxing
 disabled:
 
 ```sh

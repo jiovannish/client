@@ -79,9 +79,13 @@ pub fn run(options: Options) -> io::Result<()> {
             let port = port(&args[0])?;
             let id =
                 crate::session::target_session_id(&options.host, args.get(1).map(String::as_str))?;
-            let exposure = api.expose(&id, port)?;
+            let vm = VmClient::new(&options.host, &api_key)?.attach(&id)?;
+            let exposure = if jio_client::ingress::supports_persistent_helper(&vm)? {
+                api.expose_renewable(&id, port)?
+            } else {
+                api.expose(&id, port)?
+            };
             if exposure.credential.is_some() {
-                let vm = VmClient::new(&options.host, &api_key)?.attach(&id)?;
                 jio_client::ingress::install_helper(
                     &vm,
                     &options.host,

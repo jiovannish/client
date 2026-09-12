@@ -1,39 +1,36 @@
-Adds `jio expose`, `jio unexpose`, `jio ports` and `jio domains` for HTTP apps,
-SSE and WebSockets. A detached guest helper supports apps bound to localhost and
-keeps publication active after the local terminal closes. Custom domains use DNS
-ownership verification and automatic HTTPS, alongside the default Jio URL.
+Native Windows support and Ubuntu compatibility fixes.
 
-Requires an ingress-enabled Server and matching Linux helper release. Stop/start
-requires republishing. This remains an experimental CLI release.
+- Install on Windows x64 from PowerShell or CMD, using Windows OpenSSH. No WSL is required.
+- Publish multiple VM ports without exhausting the small temporary filesystem in older Ubuntu templates.
+- On systemd templates with a renewal-capable Server, supervise each published port with a service that reconnects after a clean restart.
+- Use the guest home directory for `jio yolo codex`, accept shutdown reasons, and allow more time for clean stop and deletion.
 
 ## Install
+
+macOS / Linux:
 
 ```sh
 curl -fsSL https://github.com/jiovannish/client/releases/latest/download/install.sh | sh
 ```
 
-The installer verifies the archive's SHA-256 checksum and replaces only the CLI binary. It
-does not change API keys, VM keys, shell startup files or saved configuration.
-The installer uses `~/.local/bin` when it is on `PATH`, otherwise `/usr/local/bin`
-when writable or accessible with passwordless sudo. If neither is available, it
-uses `~/.local/bin` and prints an `export PATH=...` command. License notices are
-installed under `../share/jio` relative to the install directory.
+Windows (PowerShell):
 
-Native binaries: macOS ARM64 and Intel (11+), Linux ARM64 and x86-64 (glibc 2.35+).
-OpenSSH (`ssh` and `ssh-keygen`) is required for VM access. Windows and Alpine/musl
-are not supported by these binaries. Linux client support does not imply ARM
-support for the VM host runtime.
+```powershell
+irm https://github.com/jiovannish/client/releases/latest/download/install.ps1 | iex
+```
 
-Run `jio login '<your-api-key>'`, then `jio usage`, `jio create`, `jio list` and
-`jio connect`. Account quotas, session expiry and available sizes are enforced by
-the service. Exiting a shell does not destroy the VM; use `jio destroy` to remove it.
+Windows (CMD):
 
-Source is attached by GitHub for this exact tag. Each archive contains the CLI,
-Apache license and bundled dependency notices. Checksums detect corrupted
-downloads; they are not independent signatures of the publisher.
+```bat
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/jiovannish/client/releases/latest/download/install.ps1 | iex"
+```
 
-The npm and Python SDKs remain source-build only in this release.
+The installers verify archive checksums and preserve API keys, VM keys, and saved configuration. Windows installs into `%LOCALAPPDATA%\Jio\bin` and updates the user PATH; reopen CMD afterward. Enable **OpenSSH Client** in Windows Settings → Optional features.
 
-## Documentation
+Native binaries: macOS ARM64 and Intel (11+), Linux ARM64 and x86-64 (glibc 2.35+), and Windows x64. OpenSSH is required. Windows ARM64 and Alpine/musl binaries are not included.
+
+Each archive includes the CLI, Apache-2.0 license, and dependency notices. Checksums detect download corruption; they are not independent publisher signatures. Node.js and Python SDKs remain source-build only.
+
+Jio remains experimental. Published app URLs are public; use application authentication for private content. Persistent port publication requires a compatible Server and systemd guest; older templates require republishing after restart.
 
 [CLI guide](https://github.com/jiovannish/client/blob/main/docs/README.md) · [Security](https://github.com/jiovannish/client/blob/main/SECURITY.md) · [Code of Conduct](https://github.com/jiovannish/client/blob/main/CODE_OF_CONDUCT.md)

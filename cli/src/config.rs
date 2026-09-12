@@ -6,11 +6,17 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame, TerminalOptions, Viewport};
 use std::env;
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs;
+#[cfg(unix)]
+use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(windows)]
+use jio_client::windows::{create_private_directory, require_private_file};
 
 const CONFIG_FILE: &str = "config";
 const CREDENTIALS_FILE: &str = "credentials";
@@ -285,11 +291,7 @@ impl ConfigStore {
         let root = match env::var_os("JIO_STATE_DIR") {
             Some(path) if !path.is_empty() => PathBuf::from(path),
             Some(_) => return Err(invalid_input("JIO_STATE_DIR must not be empty")),
-            None => env::var_os("HOME")
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from)
-                .ok_or_else(|| invalid_input("HOME or JIO_STATE_DIR is required"))?
-                .join(".jio"),
+            None => jio_client::home_directory()?.join(".jio"),
         };
         Ok(Self { root })
     }
@@ -308,9 +310,15 @@ impl ConfigStore {
             Err(error) => return Err(error),
         }
         require_private_file(&path)?;
+        #[cfg(unix)]
         let expected = fs::symlink_metadata(&path)?;
+        #[cfg(unix)]
         let file = File::open(&path)?;
+        #[cfg(windows)]
+        let file = jio_client::windows::open_private_read(&path)?;
+        #[cfg(unix)]
         let opened = file.metadata()?;
+        #[cfg(unix)]
         if opened.dev() != expected.dev() || opened.ino() != expected.ino() {
             return Err(invalid_data("local Jio file changed while it was opened"));
         }
@@ -357,6 +365,7 @@ impl ConfigStore {
     }
 }
 
+#[cfg(unix)]
 fn create_private_directory(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata)
@@ -377,6 +386,7 @@ fn create_private_directory(path: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(unix)]
 fn require_private_file(path: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     let parent = path
@@ -406,12 +416,15 @@ fn replace_private_file(directory: &Path, target: &Path, contents: &[u8]) -> io:
             ".{CONFIG_FILE}-{}-{timestamp}-{suffix}",
             std::process::id()
         ));
-        let mut file = match OpenOptions::new()
+        #[cfg(unix)]
+        let created = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(&temporary)
-        {
+            .open(&temporary);
+        #[cfg(windows)]
+        let created = jio_client::windows::new_private_file(&temporary);
+        let mut file = match created {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
@@ -420,12 +433,13 @@ fn replace_private_file(directory: &Path, target: &Path, contents: &[u8]) -> io:
             let _ = fs::remove_file(&temporary);
             return Err(error);
         }
+        drop(file);
         if let Err(error) = fs::rename(&temporary, target) {
             let _ = fs::remove_file(&temporary);
             return Err(error);
         }
         require_private_file(target)?;
-        return File::open(directory)?.sync_all();
+        return jio_client::sync_directory(directory);
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
@@ -448,6 +462,7 @@ mod tests {
     use jio_client::VmSize;
     use std::fs;
     use std::io;
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -488,6 +503,7 @@ mod tests {
             store.save(Config { size })?;
             assert_eq!(store.load()?.size, size);
         }
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(directory.path().join("config"))?.mode() & 0o777,
             0o600

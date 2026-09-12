@@ -1,19 +1,22 @@
 use jio_client::{CommandResult, PreparedConnection, Session, VmClient, VmSize};
 use std::env;
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs;
+#[cfg(unix)]
+use std::fs::File;
 use std::io::{self, IsTerminal, Read};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const MAX_CODEX_AUTH_BYTES: u64 = 64 * 1024;
 const CODEX_YOLO_COMMAND: &str = concat!(
-    "cd /workspace && exec codex ",
+    "cd \"$HOME\" && exec codex ",
     "--profile jio-yolo ",
     "--dangerously-bypass-approvals-and-sandbox",
 );
-const CODEX_YOLO_PROFILE: &[u8] = b"[projects.\"/workspace\"]\ntrust_level = \"trusted\"\n";
+const CODEX_YOLO_PROFILE: &[u8] = b"[projects.\"/home/jio\"]\ntrust_level = \"trusted\"\n";
 const INSTALL_CODEX_YOLO_PROFILE: &str = concat!(
     "set -eu\n",
     "umask 077\n",
@@ -246,10 +249,7 @@ fn codex_auth_path() -> io::Result<PathBuf> {
     let directory = match env::var_os("CODEX_HOME") {
         Some(directory) if !directory.is_empty() => PathBuf::from(directory),
         Some(_) => return Err(invalid("CODEX_HOME must not be empty")),
-        None => env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| invalid("HOME or CODEX_HOME is required"))?
-            .join(".codex"),
+        None => jio_client::home_directory()?.join(".codex"),
     };
     Ok(directory.join("auth.json"))
 }
@@ -282,8 +282,13 @@ fn read_codex_auth(path: &Path) -> io::Result<Vec<u8>> {
         )));
     }
 
+    #[cfg(unix)]
     let file = File::open(path)?;
+    #[cfg(windows)]
+    let file = jio_client::windows::open_private_read(path)?;
+    #[cfg(unix)]
     let opened = file.metadata()?;
+    #[cfg(unix)]
     if !opened.is_file()
         || opened.dev() != expected.dev()
         || opened.ino() != expected.ino()
@@ -291,6 +296,7 @@ fn read_codex_auth(path: &Path) -> io::Result<Vec<u8>> {
     {
         return Err(invalid("local Codex login changed while it was opened"));
     }
+    #[cfg(unix)]
     if opened.mode() & 0o077 != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -400,14 +406,22 @@ mod tests {
         Ok(())
     }
 
-    use super::{read_codex_auth, require_success};
+    #[cfg(unix)]
+    use super::read_codex_auth;
+    use super::require_success;
     use jio_client::CommandResult;
+    #[cfg(unix)]
     use std::fs::{self, OpenOptions, Permissions};
+    #[cfg(unix)]
     use std::io::{self, Write};
+    #[cfg(unix)]
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    #[cfg(unix)]
     use std::path::PathBuf;
+    #[cfg(unix)]
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[cfg(unix)]
     fn temporary_directory() -> io::Result<PathBuf> {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -420,6 +434,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn reads_only_a_private_codex_login_file() -> io::Result<()> {
         let directory = temporary_directory()?;
         let path = directory.join("auth.json");

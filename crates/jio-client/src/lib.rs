@@ -18,14 +18,47 @@ use std::time::{Duration, Instant};
 mod list;
 pub use list::VmSummary;
 
-#[cfg(unix)]
 mod vm;
 
-#[cfg(unix)]
+#[cfg(windows)]
+#[doc(hidden)]
+pub mod windows;
+
 pub use vm::{
     CommandResult, DEFAULT_COMMAND_TIMEOUT, MAX_COMMAND_TIMEOUT, MAX_FILE_BYTES,
     PreparedConnection, Vm, VmClient,
 };
+
+/// User profile directory on Windows, HOME on Unix.
+#[doc(hidden)]
+pub fn home_directory() -> io::Result<PathBuf> {
+    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    env::var_os(key)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::other(format!("{key} is required")))
+}
+
+/// Flush directory entries where the platform exposes directory synchronization.
+#[doc(hidden)]
+pub fn sync_directory(path: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    return File::open(path)?.sync_all();
+    // Windows file contents are flushed before atomic rename; std does not
+    // provide a supported directory flush operation on Windows.
+    #[cfg(windows)]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+fn ssh_program(name: &str) -> PathBuf {
+    #[cfg(windows)]
+    return windows::system_executable(&format!("OpenSSH\\{name}.exe"));
+    #[cfg(unix)]
+    name.into()
+}
 
 pub const MAX_INSTANCES: usize = 64;
 pub const MAX_SSH_PUBLIC_KEY_BYTES: usize = 512;
@@ -306,12 +339,23 @@ pub enum SessionState {
     Destroyed,
 }
 
+/// Verified terminal reason reported by the standalone Core lifecycle API.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[cfg_attr(test, derive(Serialize))]
+#[serde(rename_all = "snake_case")]
+pub enum ShutdownReason {
+    HostStop,
+    GuestReboot,
+    GuestPoweroff,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(test, derive(Serialize))]
 #[serde(deny_unknown_fields)]
 pub struct Session {
     pub session_id: String,
     pub state: SessionState,
+    pub shutdown_reason: Option<ShutdownReason>,
     pub generation: u64,
     /// Present only when connected to the transitional runtime-selected Core API.
     pub runtime: Option<String>,
@@ -620,7 +664,7 @@ impl SessionClient {
     }
 
     pub fn stop(&self, id: &str) -> io::Result<Session> {
-        self.lifecycle(id, "stop", DEFAULT_REQUEST_TIMEOUT, SessionState::Stopped)
+        self.lifecycle(id, "stop", CREATE_SESSION_TIMEOUT, SessionState::Stopped)
     }
 
     pub fn start(&self, id: &str) -> io::Result<Session> {
@@ -631,7 +675,7 @@ impl SessionClient {
         if !valid_session_id(id) {
             return Err(invalid("session ID is invalid"));
         }
-        let connection = Connection::open(&self.endpoint, &self.api_key, DEFAULT_REQUEST_TIMEOUT)?;
+        let connection = Connection::open(&self.endpoint, &self.api_key, CREATE_SESSION_TIMEOUT)?;
         let response = connection
             .client
             .delete(format!("{}/v0/sessions/{id}", connection.base_url))
@@ -659,7 +703,7 @@ impl SessionClient {
         let connection = Connection::open(&self.endpoint, &self.api_key, timeout)?;
         let generation = self.get(id)?.generation;
         let mut random = [0u8; 16];
-        File::open("/dev/urandom")?.read_exact(&mut random)?;
+        getrandom::fill(&mut random).map_err(io::Error::other)?;
         let response = connection
             .client
             .post(format!("{}/v0/sessions/{id}/{action}", connection.base_url))
@@ -1112,7 +1156,7 @@ impl Tunnel {
         let local_port = socket.local_addr()?.port();
         drop(socket);
         let forward = format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}");
-        let mut child = Command::new("ssh")
+        let mut child = Command::new(ssh_program("ssh"))
             .arg("-N")
             .arg("-T")
             .arg("-o")
@@ -1703,7 +1747,7 @@ mod tests {
         let fields = wire
             .as_object_mut()
             .ok_or_else(|| io::Error::other("session must be an object"))?;
-        for field in ["size", "vcpu_count", "memory_mib"] {
+        for field in ["size", "vcpu_count", "memory_mib", "shutdown_reason"] {
             fields.remove(field);
         }
         let legacy: Session = serde_json::from_value(wire.clone())?;
@@ -1721,6 +1765,21 @@ mod tests {
             (current.vcpu_count, current.memory_mib),
             (Some(2), Some(4096))
         );
+        assert_eq!(legacy.shutdown_reason, None);
+        wire["state"] = serde_json::json!("stopped");
+        for (reason, expected) in [
+            ("host_stop", super::ShutdownReason::HostStop),
+            ("guest_reboot", super::ShutdownReason::GuestReboot),
+            ("guest_poweroff", super::ShutdownReason::GuestPoweroff),
+        ] {
+            wire["shutdown_reason"] = serde_json::json!(reason);
+            let stopped: Session = serde_json::from_value(wire.clone())?;
+            validate_session(&stopped)?;
+            assert_eq!(stopped.shutdown_reason, Some(expected));
+        }
+        wire["shutdown_reason"] = serde_json::json!("unknown");
+        assert!(serde_json::from_value::<Session>(wire.clone()).is_err());
+        wire["shutdown_reason"] = serde_json::json!("host_stop");
         wire["unexpected_field"] = serde_json::json!(true);
         assert!(serde_json::from_value::<Session>(wire).is_err());
         Ok(())
@@ -1784,6 +1843,7 @@ mod tests {
         Session {
             session_id: "ab".repeat(16),
             state: SessionState::Ready,
+            shutdown_reason: None,
             generation: 1,
             runtime: None,
             size: None,

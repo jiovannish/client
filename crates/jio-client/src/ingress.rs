@@ -1,6 +1,7 @@
 //! Opt-in HTTP publication through a detached, loopback-only guest helper.
 use super::*;
 use serde_json::{Value, json};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::sync::Arc;
 use std::{io::Write, path::Path};
@@ -17,6 +18,8 @@ pub struct PortExposure {
     pub credential: Option<String>,
     pub expires_at: Option<u64>,
     pub ttl_seconds: Option<u64>,
+    #[serde(default)]
+    pub renewable: bool,
 }
 /// DNS ownership instructions and the observed state of a custom domain.
 #[derive(Debug, Deserialize)]
@@ -60,11 +63,19 @@ impl SessionClient {
     }
     /// Publish an HTTP port. Repeating a healthy publication returns no new credential.
     pub fn expose(&self, id: &str, port: u16) -> io::Result<PortExposure> {
+        self.publish_port(id, port, false)
+    }
+    /// Publish with a revocable VM/port credential that can renew tunnel leases.
+    /// Install the persistent guest helper to reconnect after a reboot.
+    pub fn expose_renewable(&self, id: &str, port: u16) -> io::Result<PortExposure> {
+        self.publish_port(id, port, true)
+    }
+    fn publish_port(&self, id: &str, port: u16, renewable: bool) -> io::Result<PortExposure> {
         target(id, port)?;
         let exposure: PortExposure = serde_json::from_value(self.ingress_request(
             reqwest::Method::POST,
             &format!("/v1/sessions/{id}/ports/{port}"),
-            None,
+            renewable.then(|| json!({"renewable":true})),
         )?)
         .map_err(invalid)?;
         if exposure.session_id != id || exposure.port != port || exposure.generation == 0 {
@@ -159,6 +170,8 @@ struct Helper {
     port: u16,
     credential: String,
     ttl_seconds: u64,
+    #[serde(default)]
+    renewable: bool,
 }
 impl Helper {
     fn validate(&self) -> io::Result<()> {
@@ -228,7 +241,11 @@ async fn helper(config: Helper) -> io::Result<()> {
                 let _current=current;let _pending=pending;
                 let response=client.get(format!("{}/v1/sessions/{}/ports/{}/connect",config.endpoint.trim_end_matches('/'),config.session_id,config.port)).bearer_auth(&config.credential).header("connection","upgrade").header("upgrade","jio-ingress").timeout(Duration::from_secs(35)).send().await;
                 let Ok(response)=response else {tokio::time::sleep(Duration::from_secs(2)).await;return};
-                if matches!(response.status().as_u16(),401|403|404|410) {let _=stop.try_send(());return;}
+                if matches!(response.status().as_u16(),401|403|404|410) {
+                    let _=stop.try_send(());
+                    if config.renewable { tokio::time::sleep(Duration::from_secs(2)).await; }
+                    return;
+                }
                 if response.status()!=StatusCode::SWITCHING_PROTOCOLS || response.headers().get("upgrade").is_none_or(|v| v != "jio-ingress") {
                     if response.status()!=StatusCode::NO_CONTENT {tokio::time::sleep(Duration::from_secs(2)).await;}
                     return;
@@ -249,7 +266,87 @@ async fn helper(config: Helper) -> io::Result<()> {
         #[allow(unreachable_code)]
         Ok::<(), io::Error>(())
     };
-    tokio::select! {result=run=>result,_=tokio::time::sleep(lifetime)=>Ok(()),_=stop_rx.recv()=>Ok(())}
+    if config.renewable {
+        tokio::select! {result=run=>result,result=renew_lease(&client,&config,&mut stop_rx)=>result}
+    } else {
+        tokio::select! {result=run=>result,_=tokio::time::sleep(lifetime)=>Ok(()),_=stop_rx.recv()=>Ok(())}
+    }
+}
+
+async fn renew_lease(
+    client: &reqwest::Client,
+    config: &Helper,
+    reconnect: &mut tokio::sync::mpsc::Receiver<()>,
+) -> io::Result<()> {
+    let mut backoff = Duration::from_secs(2);
+    loop {
+        match renewal(client, config).await {
+            Ok(None) => return Ok(()), // Unpublished, revoked or expired: do not restart.
+            Ok(Some(ttl)) => {
+                backoff = Duration::from_secs(2);
+                tokio::select! {
+                    _=tokio::time::sleep(Duration::from_secs((ttl * 3 / 4).max(1)))=>{},
+                    _=reconnect.recv()=>{},
+                }
+            }
+            Err(_) => {
+                // Server owns expiry; a transient outage never extends a lease locally.
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+            }
+        }
+    }
+}
+
+async fn renewal(client: &reqwest::Client, config: &Helper) -> io::Result<Option<u64>> {
+    let mut response = client
+        .post(format!(
+            "{}/v1/sessions/{}/ports/{}/renew",
+            config.endpoint.trim_end_matches('/'),
+            config.session_id,
+            config.port
+        ))
+        .bearer_auth(&config.credential)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(other)?;
+    if matches!(response.status().as_u16(), 401 | 403 | 404 | 410) {
+        return Ok(None);
+    }
+    if response.status() != StatusCode::OK {
+        return Err(io::Error::other("lease renewal unavailable"));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(other)? {
+        if bytes.len().saturating_add(chunk.len()) > 4096 {
+            return Err(invalid("lease response exceeded its bound"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let lease: Value = serde_json::from_slice(&bytes).map_err(invalid)?;
+    if lease["session_id"] != config.session_id
+        || lease["port"] != config.port
+        || lease["generation"]
+            .as_u64()
+            .is_none_or(|generation| generation == 0)
+    {
+        return Err(invalid("lease response targets another VM or port"));
+    }
+    let ttl = lease["ttl_seconds"]
+        .as_u64()
+        .filter(|ttl| (1..=14400).contains(ttl))
+        .ok_or_else(|| invalid("invalid renewed lease lifetime"))?;
+    Ok(Some(ttl))
+}
+
+/// Whether this VM can supervise a persistent ingress helper through systemd.
+pub fn supports_persistent_helper(vm: &Vm) -> io::Result<bool> {
+    let result = vm.exec(
+        "test -d /run/systemd/system && test \"$(cat /proc/1/comm)\" = systemd",
+        Duration::from_secs(10),
+    )?;
+    Ok(result.success())
 }
 
 /// Install this CLI release's Linux helper through an existing authenticated SSH session.
@@ -278,6 +375,7 @@ pub fn install_helper(
         ttl_seconds: exposure
             .ttl_seconds
             .ok_or_else(|| invalid("missing helper lifetime"))?,
+        renewable: exposure.renewable,
     };
     config.validate()?;
     // ponytail: deployed snapshots leave lo down; remove this compatibility setup
@@ -301,7 +399,7 @@ pub fn install_helper(
     if data.len() > 4096 {
         return Err(invalid("helper configuration too large"));
     }
-    let command = install_command(binary.len(), version)?;
+    let command = install_command(binary.len(), version, config.port, config.renewable)?;
     let mut payload = binary;
     payload.extend_from_slice(&data);
     let installed = vm.exec_with_input(&command, Some(&payload), Duration::from_secs(120))?;
@@ -313,10 +411,18 @@ pub fn install_helper(
     Ok(())
 }
 
-fn install_command(binary_bytes: usize, version: &str) -> io::Result<String> {
+fn install_command(
+    binary_bytes: usize,
+    version: &str,
+    port: u16,
+    renewable: bool,
+) -> io::Result<String> {
     validate_helper_version(version)?;
+    if port == 0 {
+        return Err(invalid("invalid helper port"));
+    }
     Ok(format!(
-        "set -- {binary_bytes} 'jio {version}'\n{INSTALL_HELPER}"
+        "set -- {binary_bytes} 'jio {version}' {port} {renewable}\n{INSTALL_HELPER}"
     ))
 }
 
@@ -324,7 +430,8 @@ fn install_command(binary_bytes: usize, version: &str) -> io::Result<String> {
 // EOF, version failures and catchable signals clean up without another SSH connection.
 const INSTALL_HELPER: &str = r#"set -eu
 umask 077
-root=$(mktemp -d "${TMPDIR:-/tmp}/jio-ingress.XXXXXXXXXXXX")
+# /var/tmp uses the guest's system disk; older /tmp roots are only 16 MiB.
+root=$(mktemp -d "${TMPDIR:-/var/tmp}/jio-ingress.XXXXXXXXXXXX")
 trap 'rm -rf -- "$root"' 0
 trap 'exit 1' 1 2 15
 cat > "$root/payload"
@@ -334,6 +441,37 @@ chmod 700 "$root/jio"
 [ "$("$root/jio" --version)" = "$2" ]
 tail -c +"$(($1 + 1))" "$root/payload" > "$root/config"
 rm "$root/payload"
+if [ "$4" = true ]; then
+    test -d /run/systemd/system
+    test "$(cat /proc/1/comm)" = systemd
+    destination="/var/lib/jio-ingress/$3"
+    unit="jio-ingress-$3.service"
+    sudo -n install -d -m 0700 "$destination"
+    sudo -n install -m 0700 "$root/jio" "$destination/jio.new"
+    sudo -n install -m 0600 "$root/config" "$destination/config.new"
+    sudo -n mv -f "$destination/jio.new" "$destination/jio"
+    sudo -n mv -f "$destination/config.new" "$destination/config"
+    cat > "$root/unit" <<EOF
+[Unit]
+Description=Jio HTTPS for port $3
+After=network.target jio-agent.service
+
+[Service]
+ExecStart=$destination/jio __ingress-helper
+StandardInput=file:$destination/config
+Restart=on-failure
+RestartSec=2
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    sudo -n install -m 0644 "$root/unit" "/etc/systemd/system/$unit"
+    sudo -n systemctl daemon-reload
+    sudo -n systemctl enable "$unit" >/dev/null
+    sudo -n systemctl restart "$unit"
+    exit 0
+fi
 command -v nohup >/dev/null
 nohup sh -c '
     set -eu
@@ -366,14 +504,20 @@ fn helper_binary(version: &str, target: &str) -> io::Result<Vec<u8>> {
         return read_binary(Path::new(&path));
     }
     validate_helper_version(version)?;
-    let root = env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| invalid("HOME is required"))?
-        .join(".cache/jio/helpers");
+    let root = crate::home_directory()?.join(".cache/jio/helpers");
+    #[cfg(unix)]
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(&root)?;
+    #[cfg(windows)]
+    {
+        std::fs::create_dir_all(
+            root.parent()
+                .ok_or_else(|| invalid("missing cache parent"))?,
+        )?;
+        crate::windows::create_private_directory(&root)?;
+    }
     super::vm::require_directory(&root)?;
     let cached = root.join(format!("{version}-{target}"));
     if cached.exists() {
@@ -419,15 +563,22 @@ fn helper_binary(version: &str, target: &str) -> io::Result<Vec<u8>> {
         return Err(invalid("helper checksum mismatch"));
     }
     let temporary = root.join(format!(".{version}-{target}-{}", std::process::id()));
+    #[cfg(unix)]
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&temporary)?;
+    #[cfg(windows)]
+    let mut file = crate::windows::new_private_file(&temporary)?;
     file.write_all(&archive)?;
     drop(file);
     // Extract only the named regular binary, never arbitrary archive paths.
-    let output = std::process::Command::new("tar")
+    #[cfg(windows)]
+    let tar = crate::windows::system_executable("tar.exe");
+    #[cfg(unix)]
+    let tar = "tar";
+    let output = std::process::Command::new(tar)
         .args(["-xOzf"])
         .arg(&temporary)
         .arg("jio")
@@ -478,13 +629,14 @@ fn read_binary(path: &Path) -> io::Result<Vec<u8>> {
 mod tests {
     use super::*;
     #[test]
+    #[cfg(unix)]
     fn helper_install_cleans_failed_transfers_and_hands_off_cleanup() -> io::Result<()> {
         use std::process::{Command, Stdio};
         let temporary = super::super::vm::temporary_directory(&env::temp_dir())?;
         let binary = b"#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'jio 0.2.0'; exit; fi\ncat >/dev/null\nwhile [ ! -f \"$TMPDIR/finish\" ]; do sleep 0.05; done\nexit 7\n";
         let run = |version: &str, bytes: &[u8]| -> io::Result<std::process::Output> {
             let mut child = Command::new("sh")
-                .args(["-c", &install_command(binary.len(), version)?])
+                .args(["-c", &install_command(binary.len(), version, 3000, false)?])
                 .env("TMPDIR", &temporary)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -527,7 +679,7 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         std::fs::remove_dir_all(temporary)?;
-        assert!(install_command(1, "0.2.0'; exit 0").is_err());
+        assert!(install_command(1, "0.2.0'; exit 0", 3000, false).is_err());
         Ok(())
     }
 
@@ -541,6 +693,7 @@ mod tests {
             session_id: "a".repeat(32),
             port: app.local_addr()?.port(),
             credential: "b".repeat(64),
+            renewable: false,
             ttl_seconds: 60,
         };
         let task = tokio::spawn(helper(config));
@@ -560,6 +713,61 @@ mod tests {
         task.abort();
         result
     }
+    #[tokio::test]
+    async fn renewal_checks_scope_bounds_and_terminal_status() -> io::Result<()> {
+        use tokio::io::AsyncReadExt;
+        let valid =
+            json!({"session_id":"a".repeat(32),"port":3000,"generation":2,"ttl_seconds":14400});
+        let mut wrong_vm = valid.clone();
+        wrong_vm["session_id"] = json!("c".repeat(32));
+        let mut wrong_port = valid.clone();
+        wrong_port["port"] = json!(3001);
+        let mut unbounded = valid.clone();
+        unbounded["ttl_seconds"] = json!(14401);
+        let cases = [
+            (200, valid.to_string(), 1),
+            (200, wrong_vm.to_string(), -1),
+            (200, wrong_port.to_string(), -1),
+            (200, unbounded.to_string(), -1),
+            (200, " ".repeat(4097), -1),
+            (409, "{}".into(), -1),
+            (401, "{}".into(), 0),
+            (404, "{}".into(), 0),
+            (410, "{}".into(), 0),
+        ];
+        for (status, body, expected) in cases {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let config = Helper {
+                endpoint: format!("http://{}", listener.local_addr()?),
+                session_id: "a".repeat(32),
+                port: 3000,
+                credential: "b".repeat(64),
+                renewable: true,
+                ttl_seconds: 60,
+            };
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await?;
+                let mut request = Vec::new();
+                let mut byte = [0; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).await?;
+                    request.push(byte[0]);
+                    if request.len() > 4096 {
+                        return Err(invalid("test request exceeded bound"));
+                    }
+                }
+                stream.write_all(format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await
+            });
+            let result = renewal(&reqwest::Client::new(), &config).await;
+            server.await.map_err(other)??;
+            match expected {
+                1 => assert_eq!(result?, Some(14400)),
+                0 => assert_eq!(result?, None),
+                _ => assert!(result.is_err()),
+            }
+        }
+        Ok(())
+    }
     #[test]
     fn rejects_helper_redirects_credentials_and_unbounded_leases() {
         let mut helper = Helper {
@@ -567,6 +775,7 @@ mod tests {
             session_id: "a".repeat(32),
             port: 3000,
             credential: "b".repeat(64),
+            renewable: false,
             ttl_seconds: 3600,
         };
         assert!(helper.validate().is_ok());

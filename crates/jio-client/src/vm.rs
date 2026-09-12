@@ -3,10 +3,15 @@ use crate::{
     valid_ssh_public_key,
 };
 use std::env;
+#[cfg(unix)]
 use std::ffi::OsString;
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{self, File};
+#[cfg(unix)]
+use std::fs::{DirBuilder, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -29,14 +34,30 @@ const PUBLIC_KEY: &str = "id_ed25519.pub";
 const KNOWN_HOSTS: &str = "known_hosts";
 const REQUESTED_SIZE: &str = "requested-size";
 const CURRENT_SESSION: &str = "current-session";
+#[cfg(unix)]
 const CONNECTION_PREPARE_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(unix)]
 const CONNECTION_PREPARE_RETRY: Duration = Duration::from_millis(25);
+#[cfg(unix)]
 const CONNECTION_READY_MARKER: &[u8] = b"\x1dJIO_SSH_READY_V1\x1d";
+#[cfg(unix)]
 const CONNECTION_READY_COMMAND: &str =
     "printf '\\035JIO_SSH_READY_V1\\035'; exec \"${SHELL:-/bin/sh}\" -l";
+#[cfg(unix)]
 const MAX_CONNECTION_PRELUDE_BYTES: usize = 64 * 1024;
 
+#[cfg(unix)]
 mod transport;
+#[cfg(windows)]
+#[path = "vm/transport_windows.rs"]
+mod transport;
+#[cfg(all(unix, test))]
+#[path = "vm/transport_windows.rs"]
+mod windows_transport_tests;
+#[cfg(windows)]
+pub(super) use crate::windows::{
+    create_private_directory, require_directory, require_private_file, write_private_file,
+};
 
 #[derive(Clone, Copy)]
 enum TtyMode {
@@ -76,10 +97,7 @@ impl VmClient {
     pub fn new(endpoint: impl Into<String>, api_key: impl Into<String>) -> io::Result<Self> {
         let root = match env::var_os("JIO_STATE_DIR") {
             Some(path) => PathBuf::from(path),
-            None => env::var_os("HOME")
-                .map(PathBuf::from)
-                .ok_or_else(|| invalid_input("HOME or JIO_STATE_DIR is required"))?
-                .join(".jio"),
+            None => crate::home_directory()?.join(".jio"),
         };
         Self::with_state_directory(endpoint, api_key, root)
     }
@@ -137,7 +155,7 @@ impl VmClient {
         }
         let state = self.state_directory()?;
         fs::remove_file(state.join(CURRENT_SESSION))?;
-        File::open(state)?.sync_all()
+        crate::sync_directory(state)
     }
 
     fn state_directory(&self) -> io::Result<&Path> {
@@ -274,7 +292,7 @@ impl VmClient {
                     return Err(io::Error::other("local target already exists"));
                 }
                 fs::rename(temporary, target)?;
-                File::open(&self.sessions)?.sync_all()?;
+                crate::sync_directory(&self.sessions)?;
             }
             Ok(())
         })();
@@ -364,7 +382,7 @@ impl VmClient {
                 ));
             }
             fs::rename(temporary, &target)?;
-            File::open(&self.sessions)?.sync_all()
+            crate::sync_directory(&self.sessions)
         })();
         if let Err(failure) = finalize {
             // Once Core acknowledges the request it owns the VM lifecycle. If
@@ -524,9 +542,17 @@ impl VmClient {
                 session.guest_ipv4
             }
         );
+        #[cfg(unix)]
         let mut known_hosts_option = OsString::from("UserKnownHostsFile=");
+        #[cfg(unix)]
         known_hosts_option.push(&credentials.known_hosts);
-        let mut command = Command::new("ssh");
+        #[cfg(windows)]
+        let known_hosts_option = format!(
+            "UserKnownHostsFile=\"{}\"",
+            credentials.known_hosts.to_string_lossy().replace('\\', "/")
+        );
+        let mut command = Command::new(crate::ssh_program("ssh"));
+        #[cfg(unix)]
         if let Some((socket, _, master)) = transport {
             command
                 .arg("-F")
@@ -552,6 +578,8 @@ impl VmClient {
                 .arg("-o")
                 .arg("ControlPath=none");
         }
+        #[cfg(windows)]
+        command.arg("-F").arg("NUL");
         if !matches!(tty_mode, TtyMode::Disabled) {
             command.arg("-q");
         }
@@ -579,7 +607,11 @@ impl VmClient {
             .arg("-o")
             .arg(known_hosts_option)
             .arg("-o")
-            .arg("GlobalKnownHostsFile=/dev/null")
+            .arg(if cfg!(windows) {
+                "GlobalKnownHostsFile=NUL"
+            } else {
+                "GlobalKnownHostsFile=/dev/null"
+            })
             .arg("-o")
             .arg("UpdateHostKeys=no")
             .arg("-o")
@@ -618,6 +650,7 @@ impl VmClient {
 /// The guest shell itself is already open, but its pseudoterminal remains
 /// hidden until [`PreparedConnection::connect`] hands it to the local terminal.
 /// Dropping this value closes that hidden shell.
+#[cfg(unix)]
 pub struct PreparedConnection {
     process: Child,
     terminal: File,
@@ -626,6 +659,7 @@ pub struct PreparedConnection {
     _vm: Vm,
 }
 
+#[cfg(unix)]
 impl PreparedConnection {
     /// Reveals the already-open guest shell and relays the local terminal to it.
     pub fn connect(mut self) -> io::Result<()> {
@@ -639,10 +673,30 @@ impl PreparedConnection {
     }
 }
 
+#[cfg(unix)]
 impl Drop for PreparedConnection {
     fn drop(&mut self) {
         if !self.finished {
             terminate(&mut self.process);
+        }
+    }
+}
+
+/// A Windows connection prepared for handoff to the native OpenSSH console.
+#[cfg(windows)]
+pub struct PreparedConnection {
+    command: Command,
+    _vm: Vm,
+}
+#[cfg(windows)]
+impl PreparedConnection {
+    /// Open the interactive shell using Windows OpenSSH's console support.
+    pub fn connect(mut self) -> io::Result<()> {
+        let status = self.command.status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("SSH exited with {status}")))
         }
     }
 }
@@ -804,6 +858,7 @@ impl Vm {
         Ok(())
     }
 
+    #[cfg(unix)]
     pub fn prepare_connection(self) -> io::Result<PreparedConnection> {
         let session = self.cached_session();
         if session.state != SessionState::Ready {
@@ -837,6 +892,12 @@ impl Vm {
             finished: false,
             _vm: self,
         })
+    }
+
+    #[cfg(windows)]
+    pub fn prepare_connection(self) -> io::Result<PreparedConnection> {
+        let command = self.command(TtyMode::Forced)?;
+        Ok(PreparedConnection { command, _vm: self })
     }
 
     pub fn stop(&self) -> io::Result<Session> {
@@ -1088,6 +1149,7 @@ fn terminate(child: &mut Child) {
     let _ = child.wait();
 }
 
+#[cfg(unix)]
 fn pseudoterminal() -> io::Result<(File, File)> {
     use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
 
@@ -1102,6 +1164,7 @@ fn pseudoterminal() -> io::Result<(File, File)> {
     Ok((File::from(master), guest))
 }
 
+#[cfg(unix)]
 fn wait_for_connection(process: &mut Child, terminal: &mut File) -> io::Result<Vec<u8>> {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 
@@ -1151,12 +1214,14 @@ fn wait_for_connection(process: &mut Child, terminal: &mut File) -> io::Result<V
     }
 }
 
+#[cfg(unix)]
 fn find_bytes(bytes: &[u8], needle: &[u8]) -> Option<usize> {
     bytes
         .windows(needle.len())
         .position(|candidate| candidate == needle)
 }
 
+#[cfg(unix)]
 fn mirror_window_size(
     source: &impl std::os::fd::AsFd,
     target: &impl std::os::fd::AsFd,
@@ -1167,6 +1232,7 @@ fn mirror_window_size(
     tcsetwinsize(target, size).map_err(io::Error::from)
 }
 
+#[cfg(unix)]
 fn relay_terminal(process: &mut Child, terminal: &File, prelude: &[u8]) -> io::Result<ExitStatus> {
     let mut local = RawTerminal::open()?;
     mirror_window_size(local.file(), terminal)?;
@@ -1205,6 +1271,7 @@ fn relay_terminal(process: &mut Child, terminal: &File, prelude: &[u8]) -> io::R
     Ok(status)
 }
 
+#[cfg(unix)]
 fn copy_terminal_output(mut remote: File) -> io::Result<()> {
     let output = io::stdout();
     let mut output = output.lock();
@@ -1225,11 +1292,13 @@ fn copy_terminal_output(mut remote: File) -> io::Result<()> {
     output.flush()
 }
 
+#[cfg(any(unix, test))]
 struct LogoutFilter {
     at_line_start: bool,
     pending: Vec<u8>,
 }
 
+#[cfg(any(unix, test))]
 impl LogoutFilter {
     const LINES: [&'static [u8]; 2] = [b"logout\n", b"logout\r\n"];
 
@@ -1279,19 +1348,23 @@ impl LogoutFilter {
     }
 }
 
+#[cfg(unix)]
 fn is_terminal_closed(failure: &io::Error) -> bool {
     failure.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error())
 }
 
+#[cfg(unix)]
 fn window_dimensions(size: &rustix::termios::Winsize) -> (u16, u16) {
     (size.ws_row, size.ws_col)
 }
 
+#[cfg(unix)]
 struct RawTerminal {
     terminal: File,
     original: rustix::termios::Termios,
 }
 
+#[cfg(unix)]
 impl RawTerminal {
     fn open() -> io::Result<Self> {
         use rustix::termios::{OptionalActions, SpecialCodeIndex, tcgetattr, tcsetattr};
@@ -1315,12 +1388,14 @@ impl RawTerminal {
     }
 }
 
+#[cfg(unix)]
 impl Read for RawTerminal {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         self.terminal.read(buffer)
     }
 }
 
+#[cfg(unix)]
 impl Drop for RawTerminal {
     fn drop(&mut self) {
         let _ = rustix::termios::tcsetattr(
@@ -1343,7 +1418,7 @@ fn exit_code(status: ExitStatus) -> i32 {
 fn random_session_id() -> io::Result<String> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut bytes = [0_u8; 16];
-    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    getrandom::fill(&mut bytes).map_err(io::Error::other)?;
     let mut id = String::with_capacity(32);
     for byte in bytes {
         id.push(char::from(HEX[usize::from(byte >> 4)]));
@@ -1355,7 +1430,7 @@ fn random_session_id() -> io::Result<String> {
 fn generate_client_authority(directory: &Path) -> io::Result<String> {
     require_directory(directory)?;
     let private_key = directory.join(PRIVATE_KEY);
-    let status = Command::new("ssh-keygen")
+    let status = Command::new(crate::ssh_program("ssh-keygen"))
         .args(["-q", "-t", "ed25519", "-N", "", "-C", "", "-f"])
         .arg(&private_key)
         .stdin(Stdio::null())
@@ -1442,7 +1517,7 @@ fn finalize_pending_credentials(directory: &Path, session: &Session) -> io::Resu
         Err(failure) if failure.kind() == io::ErrorKind::NotFound => {}
         Err(failure) => return Err(failure),
     }
-    File::open(directory)?.sync_all()
+    crate::sync_directory(directory)
 }
 
 fn same_session_identity(left: &Session, right: &Session) -> bool {
@@ -1456,6 +1531,7 @@ fn same_session_identity(left: &Session, right: &Session) -> bool {
         && left.workspace_path == right.workspace_path
 }
 
+#[cfg(unix)]
 fn create_private_directory(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata)
@@ -1486,7 +1562,11 @@ pub(super) fn temporary_directory(parent: &Path) -> io::Result<PathBuf> {
             ".create-{}-{timestamp}-{suffix}",
             std::process::id()
         ));
-        match DirBuilder::new().mode(0o700).create(&path) {
+        #[cfg(unix)]
+        let created = DirBuilder::new().mode(0o700).create(&path);
+        #[cfg(windows)]
+        let created = crate::windows::new_private_directory(&path);
+        match created {
             Ok(()) => return Ok(path),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
@@ -1502,6 +1582,7 @@ fn write_known_hosts(path: &Path, id: &str, public_key: &str) -> io::Result<()> 
     write_private_file(path, known_hosts_line(id, public_key).as_bytes())
 }
 
+#[cfg(unix)]
 pub(super) fn write_private_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
@@ -1544,7 +1625,7 @@ fn replace_private_file(directory: &Path, name: &str, contents: &[u8]) -> io::Re
                     return Err(failure);
                 }
                 require_private_file(&target)?;
-                return File::open(directory)?.sync_all();
+                return crate::sync_directory(directory);
             }
             Err(failure) if failure.kind() == io::ErrorKind::AlreadyExists => {}
             Err(failure) => return Err(failure),
@@ -1586,6 +1667,7 @@ fn require_regular(path: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(unix)]
 pub(super) fn require_private_file(path: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.is_file() && !metadata.file_type().is_symlink() && metadata.mode() & 0o777 == 0o600
@@ -1599,6 +1681,7 @@ pub(super) fn require_private_file(path: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(unix)]
 pub(super) fn require_directory(path: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.is_dir() && !metadata.file_type().is_symlink() && metadata.mode() & 0o777 == 0o700 {
@@ -1633,28 +1716,33 @@ fn invalid_data(message: impl ToString) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::run_bounded;
     use super::{
         Credentials, LogoutFilter, TtyMode, VmClient, create_private_directory, drain_bounded,
         persist_requested_size, random_session_id, remove_session_files, replace_known_hosts,
-        require_private_file, run_bounded, same_session_identity, shell_quote,
-        validate_remote_path, validate_requested_size, write_known_hosts,
+        require_private_file, same_session_identity, shell_quote, validate_remote_path,
+        validate_requested_size, write_known_hosts,
     };
     use crate::{Session, SessionClient, SessionState, VmSize};
     use std::ffi::OsStr;
     use std::io;
     use std::net::Ipv4Addr;
     use std::path::PathBuf;
+    #[cfg(unix)]
     use std::process::Command;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
+    #[cfg(unix)]
     use std::time::Duration;
 
     const API_KEY: &str = "0123456789abcdef0123456789abcdef";
 
-    fn ready_session() -> Session {
+    pub(super) fn ready_session() -> Session {
         Session {
             session_id: "abababababababababababababababab".into(),
             state: SessionState::Ready,
+            shutdown_reason: None,
             generation: 1,
             runtime: None,
             size: None,
@@ -1769,6 +1857,18 @@ mod tests {
     }
 
     #[test]
+    fn generates_openssh_credentials_in_a_path_with_spaces() -> io::Result<()> {
+        let root = std::env::temp_dir().join(format!("jio key test {}", random_session_id()?));
+        create_private_directory(&root)?;
+        let result = (|| {
+            let public_key = super::generate_client_authority(&root)?;
+            assert!(crate::valid_ssh_public_key(&public_key));
+            require_private_file(&root.join(super::PRIVATE_KEY))
+        })();
+        result.and(remove_session_files(&root))
+    }
+
+    #[test]
     fn uncertain_create_retains_local_authority_and_reports_the_id() -> io::Result<()> {
         let root = std::env::temp_dir().join(format!("jio-pending-test-{}", random_session_id()?));
         let client = VmClient::with_state_directory("http://127.0.0.1:8080", API_KEY, &root)?;
@@ -1851,9 +1951,12 @@ mod tests {
             .position(|value| *value == OsStr::new("jio@10.0.0.2"));
         assert!(tty.is_some_and(|tty| destination.is_some_and(|destination| tty < destination)));
         assert_eq!(arguments.last().copied(), Some(OsStr::new("jio@10.0.0.2")));
-        assert!(arguments.iter().any(|value| {
-            *value == OsStr::new("UserKnownHostsFile=/tmp/state with spaces/known_hosts")
-        }));
+        let expected = if cfg!(windows) {
+            "UserKnownHostsFile=\"/tmp/state with spaces/known_hosts\""
+        } else {
+            "UserKnownHostsFile=/tmp/state with spaces/known_hosts"
+        };
+        assert!(arguments.iter().any(|value| *value == OsStr::new(expected)));
         Ok(())
     }
 
@@ -1881,6 +1984,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn captures_binary_input_and_output() -> io::Result<()> {
         let mut command = Command::new("sh");
         command.args(["-c", "cat"]);
@@ -1897,6 +2001,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn rejects_output_above_the_bound() {
         let mut command = Command::new("sh");
         command.args(["-c", "printf 12345"]);

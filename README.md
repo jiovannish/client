@@ -12,6 +12,14 @@ Install the latest CLI for macOS or Linux:
 curl -fsSL https://github.com/jiovannish/client/releases/latest/download/install.sh | sh
 ```
 
+Windows (PowerShell):
+
+```powershell
+irm https://github.com/jiovannish/client/releases/latest/download/install.ps1 | iex
+```
+
+See [Windows setup](docs/README.md#windows) for prerequisites and CMD installation.
+
 Then log in with your Jio API key:
 
 ```sh

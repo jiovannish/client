@@ -21,7 +21,7 @@ for (const flag of ['--fail', '--proto', '--proto-redir', '--max-time']) {
   if (!args.includes(flag)) process.exit(1);
 }
 const url = args.find(a => a.startsWith('https://'));
-const base = 'https://github.com/jiovannish/client/releases/download/v0.2.0/';
+const base = 'https://github.com/jiovannish/client/releases/download/v0.2.1/';
 if (!url?.startsWith(base)) process.exit(1);
 const asset = url.slice(base.length);
 if (asset !== 'SHA256SUMS' && asset !== 'jio-' + process.env.TEST_TARGET + '.tar.gz') process.exit(1);
@@ -29,7 +29,7 @@ copyFileSync(process.env.TEST_FIXTURE + '/' + (asset === 'SHA256SUMS' ? 'checksu
 `, { mode: 0o755 });
   const env = { ...process.env, PATH: `${stub}:${process.env.PATH}`, JIO_INSTALL_DIR: bin, TEST_FIXTURE: fixture };
   const run = (extra = {}) => spawnSync('sh', [], { input: readFileSync(installer, 'utf8'), env: { ...env, ...extra }, encoding: 'utf8' });
-  const archive = (version = '0.2.0') => {
+  const archive = (version = '0.2.1') => {
     writeFileSync(join(files, 'jio'), `#!/bin/sh\n[ "$1" = --version ] || exit 1\necho 'jio ${version}'\n`, { mode: 0o755 });
     writeFileSync(join(files, 'LICENSE'), 'test license\n');
     writeFileSync(join(files, 'THIRDPARTY.json'), '{}\n');
@@ -47,7 +47,7 @@ copyFileSync(process.env.TEST_FIXTURE + '/' + (asset === 'SHA256SUMS' ? 'checksu
     checksums();
     const result = run();
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(execFileSync(join(bin, 'jio'), ['--version'], { encoding: 'utf8' }), 'jio 0.2.0\n');
+    assert.equal(execFileSync(join(bin, 'jio'), ['--version'], { encoding: 'utf8' }), 'jio 0.2.1\n');
   }
   // A piped child cannot change its parent's PATH: verify lookup in that parent.
   const home = join(fixture, "user's home");
@@ -67,7 +67,7 @@ copyFileSync(process.env.TEST_FIXTURE + '/' + (asset === 'SHA256SUMS' ? 'checksu
   assert.ok(exportLine);
   const recovered = spawnSync('sh', ['-ec', exportLine + '; jio --version'], { env: fallbackEnv, encoding: 'utf8' });
   assert.equal(recovered.status, 0, recovered.stderr);
-  assert.equal(recovered.stdout, 'jio 0.2.0\n');
+  assert.equal(recovered.stdout, 'jio 0.2.1\n');
   const installed = readFileSync(join(bin, 'jio'));
   const failsSafely = (extra = {}) => {
     const result = run(extra);

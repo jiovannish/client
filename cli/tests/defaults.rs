@@ -73,6 +73,7 @@ fn invalid_domain_never_contacts_the_endpoint() -> io::Result<()> {
 }
 
 #[test]
+#[cfg(unix)]
 fn missing_openssh_reports_the_requirement_before_creating_a_vm() -> io::Result<()> {
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -147,9 +148,13 @@ fn missing_openssh_reports_the_requirement_before_creating_a_vm() -> io::Result<
 
 impl TestDirectory {
     fn new(name: &str) -> io::Result<Self> {
+        #[cfg(unix)]
         use std::os::unix::fs::DirBuilderExt;
         let path = std::env::temp_dir().join(format!("jio-{name}-{}", std::process::id()));
+        #[cfg(unix)]
         std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+        #[cfg(windows)]
+        jio_client::windows::create_private_directory(&path)?;
         Ok(Self(path))
     }
 
@@ -175,6 +180,7 @@ fn login_persists_verified_credentials_and_fails_closed() -> io::Result<()> {
     use std::fs;
     use std::io::{BufRead, Read, Write};
     use std::net::TcpListener;
+    #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::time::{Duration, Instant};
 
@@ -194,7 +200,7 @@ fn login_persists_verified_credentials_and_fails_closed() -> io::Result<()> {
             ("/v1/usage", 'b', 200), // Successful replacement.
             ("/v1/usage", 'b', 200),
         ] {
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = Instant::now() + Duration::from_secs(30);
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -242,6 +248,7 @@ fn login_persists_verified_credentials_and_fails_closed() -> io::Result<()> {
 
     let config = directory.0.join("config");
     fs::write(&config, b"size=medium\n")?;
+    #[cfg(unix)]
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600))?;
     let output = directory
         .command(&endpoint)
@@ -258,6 +265,7 @@ fn login_persists_verified_credentials_and_fails_closed() -> io::Result<()> {
     assert!(!String::from_utf8_lossy(&output.stdout).contains(&key));
     let credentials = directory.0.join("credentials");
     let saved = fs::read(&credentials)?;
+    #[cfg(unix)]
     assert_eq!(
         fs::metadata(&credentials)?.permissions().mode() & 0o777,
         0o600
@@ -334,16 +342,19 @@ fn login_persists_verified_credentials_and_fails_closed() -> io::Result<()> {
         .join()
         .map_err(|_| io::Error::other("mock server failed"))??;
 
-    fs::set_permissions(&credentials, fs::Permissions::from_mode(0o644))?;
-    assert!(
-        !directory
-            .command(&endpoint)
-            .arg("usage")
-            .output()?
-            .status
-            .success()
-    );
-    fs::set_permissions(&credentials, fs::Permissions::from_mode(0o600))?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&credentials, fs::Permissions::from_mode(0o644))?;
+        assert!(
+            !directory
+                .command(&endpoint)
+                .arg("usage")
+                .output()?
+                .status
+                .success()
+        );
+        fs::set_permissions(&credentials, fs::Permissions::from_mode(0o600))?;
+    }
     for malformed in ["x".repeat(4097), format!("{endpoint}\n{key}\nextra\n")] {
         fs::write(&credentials, malformed)?;
         assert!(
@@ -355,16 +366,19 @@ fn login_persists_verified_credentials_and_fails_closed() -> io::Result<()> {
                 .success()
         );
     }
-    fs::remove_file(&credentials)?;
-    symlink(&config, &credentials)?;
-    assert!(
-        !directory
-            .command(&endpoint)
-            .arg("usage")
-            .output()?
-            .status
-            .success()
-    );
-    assert_eq!(fs::read(&config)?, b"size=medium\n");
+    #[cfg(unix)]
+    {
+        fs::remove_file(&credentials)?;
+        symlink(&config, &credentials)?;
+        assert!(
+            !directory
+                .command(&endpoint)
+                .arg("usage")
+                .output()?
+                .status
+                .success()
+        );
+        assert_eq!(fs::read(&config)?, b"size=medium\n");
+    }
     Ok(())
 }

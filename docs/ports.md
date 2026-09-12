@@ -1,22 +1,29 @@
 # Publish an app
 
-Available in the local v0.2.0 candidate; the service must enable public ingress.
+The service must enable public ingress. Version 0.2.1 adds
+reconnection after clean restart on the new systemd Ubuntu template.
 Publish the port from your local terminal, then start your app inside the VM:
 
 ```sh
 jio expose 3000
 # https://<vm-id>-3000.apps.jiovanni.sh
+jio expose 3001
+# https://<vm-id>-3001.apps.jiovanni.sh
 jio ports
 jio unexpose 3000
 ```
 
 Each command accepts an optional session ID and `--host` endpoint override.
 Apps may listen on `127.0.0.1` or `::1`. HTTP, SSE and WebSockets are supported.
-Closing your local terminal leaves the app published. Stopping the VM ends the
-helper; run `jio expose` again after starting it. Unpublishing closes its tunnels.
+Closing your local terminal leaves the app published. On systemd templates,
+the CLI installs `jio-ingress-<port>.service`, which reconnects after a
+clean VM restart using a renewable credential scoped to that VM and port.
+The Server must support renewal. Unpublishing, API-key revocation, VM destruction
+or absolute VM expiry ends access; reboot does not extend the VM lifetime.
+Legacy templates keep the temporary helper: expose the port again after restart.
 The URL is public: use application authentication for private content.
 
-The currently deployed snapshots leave loopback down. `jio expose` brings it up
+Older snapshots may leave loopback down. `jio expose` brings it up
 when installing the helper. If you start the app first, run
 `sudo ip link set dev lo up` inside the VM before binding to localhost. Future
 templates should initialize loopback before declaring the session ready.
@@ -45,10 +52,10 @@ VM and default URL intact.
 
 The CLI downloads its matching Linux release from GitHub, verifies its archive
 checksum, caches the binary privately and transfers it over existing authenticated
-SSH. Only a temporary port-specific capability enters the VM; your account API
+SSH. The CLI stages helpers in `/var/tmp` to avoid the small `/tmp`
+filesystem in older Ubuntu templates. Only a port-specific capability enters the VM; your account API
 key stays local. Four ports per VM and sixteen simultaneous connections per port
 are supported, subject to worker capacity. Raw TCP/UDP and wildcard custom domains
 are not supported.
 
-Before v0.2.0 is published, local testing can select a matching release Linux
-binary with `JIO_INGRESS_BINARY=/absolute/path/to/jio jio expose 3000`.
+Local development can select a matching Linux binary with `JIO_INGRESS_BINARY=/absolute/path/to/jio jio expose 3000`.
