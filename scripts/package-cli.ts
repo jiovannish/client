@@ -1,15 +1,18 @@
-// Release-only packaging; the installed CLI does not require Node or Rust.
+// Release-only packaging; the installed CLI does not require Bun or Rust.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const target = process.argv[2];
+assert.ok(target, 'target is required');
 assert.ok(['aarch64-apple-darwin', 'x86_64-apple-darwin', 'aarch64-unknown-linux-gnu', 'x86_64-unknown-linux-gnu', 'x86_64-pc-windows-msvc'].includes(target), 'unsupported target');
-const run = (command, args) => execFileSync(command, args, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
+const run = (command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
 assert.ok(run('rustc', ['-vV']).includes(`host: ${target}\n`), 'release binaries must be built and tested natively');
-const metadata = JSON.parse(run('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1']));
-const version = metadata.packages.find(p => p.name === 'jio-cli').version;
+const metadata: { packages: { name: string; version: string }[] } = JSON.parse(run('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1']));
+const cli = metadata.packages.find(p => p.name === 'jio-cli');
+assert.ok(cli, 'missing CLI package');
+const version = cli.version;
 const windows = target.endsWith('-windows-msvc');
 const executable = windows ? 'jio.exe' : 'jio';
 const binary = resolve(`target/${target}/release/${executable}`);
@@ -19,7 +22,16 @@ assert.ok(readFileSync('install.ps1', 'utf8').includes(`    $version = '${versio
 
 const used = new Set(run('cargo', ['tree', '--locked', '-p', 'jio-cli', '--target', target, '--prefix', 'none', '--format', '{p}'])
   .trim().split('\n').map(line => line.match(/^(\S+) v(\S+)/)?.slice(1).join('@')));
-const bundle = JSON.parse(run('cargo', ['bundle-licenses', '--format', 'json']));
+type LicenseBundle = {
+  root_name: string;
+  third_party_libraries: {
+    package_name: string;
+    package_version: string;
+    licenses: { text: string }[];
+  }[];
+  rust_standard_library?: { version: string; notices_html: string };
+};
+const bundle: LicenseBundle = JSON.parse(run('cargo', ['bundle-licenses', '--format', 'json']));
 bundle.root_name = 'jio-cli';
 bundle.third_party_libraries = bundle.third_party_libraries.filter(p => used.has(`${p.package_name}@${p.package_version}`));
 for (const dependency of bundle.third_party_libraries) {
