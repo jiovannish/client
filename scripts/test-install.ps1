@@ -6,13 +6,13 @@ $fixture = Join-Path ([IO.Path]::GetTempPath()) ('jio-test-' + [Guid]::NewGuid()
 $originalDirectory = $env:JIO_INSTALL_DIR
 $originalPath = $env:Path
 $originalUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-$script:badChecksum = $false
-$script:downloadFailure = $false
+$badChecksum = $false
+$downloadFailure = $false
 function Invoke-WebRequest {
     param($Uri, $OutFile, $TimeoutSec, [switch]$UseBasicParsing)
-    if ($script:downloadFailure) { throw 'simulated download failure' }
+    if ($downloadFailure) { throw 'simulated download failure' }
     if ($Uri.EndsWith('/SHA256SUMS')) {
-        $hash = if ($script:badChecksum) { '0' * 64 } else { (Get-FileHash "$fixture\release.zip").Hash.ToLowerInvariant() }
+        $hash = if ($badChecksum) { '0' * 64 } else { (Get-FileHash "$fixture\release.zip").Hash.ToLowerInvariant() }
         [IO.File]::WriteAllText($OutFile, "$hash  jio-x86_64-pc-windows-msvc.zip`n")
     } elseif ($Uri.EndsWith('/jio-x86_64-pc-windows-msvc.zip')) {
         Copy-Item -LiteralPath "$fixture\release.zip" -Destination $OutFile
@@ -31,11 +31,12 @@ try {
     if ((& $installed --version) -ne 'jio 0.2.1') { throw 'Installed version mismatch' }
     $before = (Get-FileHash $installed).Hash
     foreach ($failure in @('checksum', 'download')) {
-        $script:badChecksum = $failure -eq 'checksum'
-        $script:downloadFailure = $failure -eq 'download'
+        $badChecksum = $failure -eq 'checksum'
+        $downloadFailure = $failure -eq 'download'
         $failed = $false
         try { & $installer } catch { $failed = $true }
-        if (-not $failed -or (Get-FileHash $installed).Hash -ne $before) { throw 'Failed install changed the binary' }
+        if (-not $failed) { throw "Expected $failure failure" }
+        if ((Get-FileHash $installed).Hash -ne $before) { throw 'Failed install changed the binary' }
     }
     $env:JIO_TEST_BINARY = $installed
     $version = & powershell.exe -NoProfile -NonInteractive -Command '& $env:JIO_TEST_BINARY --version'
