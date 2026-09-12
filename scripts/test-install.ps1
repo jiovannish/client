@@ -2,6 +2,14 @@
 $ErrorActionPreference = 'Stop'
 $installer = Join-Path $PSScriptRoot '..\install.ps1'
 $binary = Join-Path $PSScriptRoot '..\target\x86_64-pc-windows-msvc\release\jio.exe'
+# The build runner has Visual C++; users should not need its runtime DLLs.
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+$dumpbin = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+if (-not $dumpbin) { throw 'Cannot inspect Windows executable dependencies' }
+$dependencies = & $dumpbin /dependents $binary
+if ($LASTEXITCODE -ne 0 -or ($dependencies -match '(VCRUNTIME|MSVCP)[0-9].*\.dll')) {
+    throw 'Windows executable must not require the Visual C++ redistributable'
+}
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('jio-test-' + [Guid]::NewGuid().ToString('N'))
 $originalDirectory = $env:JIO_INSTALL_DIR
 $originalPath = $env:Path
