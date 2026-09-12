@@ -68,7 +68,7 @@ function Install-Jio {
         # Stage on the destination volume. A running/locked binary fails safely.
         $staged = Join-Path $directory ('.jio-' + [Guid]::NewGuid().ToString('N') + '.exe')
         [IO.File]::Copy("$temporary\jio.exe", $staged, $false)
-        if ([IO.File]::Exists($destination)) { [IO.File]::Replace($staged, $destination, $null) }
+        if ([IO.File]::Exists($destination)) { [IO.File]::Replace($staged, $destination, [NullString]::Value) }
         else { [IO.File]::Move($staged, $destination) }
         $staged = $null
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
