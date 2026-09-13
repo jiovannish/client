@@ -1335,7 +1335,7 @@ fn normalize_host(host: String) -> io::Result<String> {
 fn endpoint_port() -> io::Result<u16> {
     match env::var("JIO_ENDPOINT_PORT") {
         Ok(value) => value.parse().map_err(invalid),
-        // Preserve the experimental hosted-Server variable while callers move
+        // Preserve the legacy hosted-Server variable while callers move
         // to endpoint-neutral standalone Core or hosted service configuration.
         Err(env::VarError::NotPresent) => match env::var("JIO_SERVER_PORT") {
             Ok(value) => value.parse().map_err(invalid),
@@ -1574,14 +1574,14 @@ mod tests {
 
     #[test]
     fn selects_the_create_contract_from_health_metadata() -> io::Result<()> {
-        let current: ApiHealthResponse = serde_json::from_str(r#"{"status":"experimental"}"#)?;
+        let current: ApiHealthResponse = serde_json::from_str(r#"{"status":"ready"}"#)?;
         assert_eq!(
             create_contract_from_health(current)?,
             CreateContract::CallerAssignedId { sizes: None }
         );
 
         let sized: ApiHealthResponse =
-            serde_json::from_str(r#"{"status":"experimental","sizes":["small","medium"]}"#)?;
+            serde_json::from_str(r#"{"status":"ready","sizes":["small","medium"]}"#)?;
         assert_eq!(
             create_contract_from_health(sized)?,
             CreateContract::CallerAssignedId {
@@ -1590,7 +1590,7 @@ mod tests {
         );
 
         let transitional: ApiHealthResponse =
-            serde_json::from_str(r#"{"status":"experimental","runtime":"python3.12-source-v0"}"#)?;
+            serde_json::from_str(r#"{"status":"ready","runtime":"python3.12-source-v0"}"#)?;
         assert_eq!(
             create_contract_from_health(transitional)?,
             CreateContract::ServerAssignedId {

@@ -1,6 +1,6 @@
 # Current limitations
 
-Jio is experimental. The API and SDKs do not yet carry a compatibility
+The API and SDKs do not yet carry a compatibility
 promise, and this release is not a production-readiness claim.
 
 - VM data is visible to the host operator. KVM isolation does not provide

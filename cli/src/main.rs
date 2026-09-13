@@ -17,7 +17,6 @@ const USAGE: &str = concat!(
     "usage: jio <command> [arguments]\n",
     "\n",
     "  Command   Arguments\n",
-    "  run       <source> [options]                     Run source code in Jio\n",
     "  create    [options]                              Create a persistent VM\n",
     "  config                                           Configure Jio defaults\n",
     "  expose    <port> [session-id] [--domain hostname] Publish an HTTP app\n",
@@ -38,8 +37,12 @@ const USAGE: &str = concat!(
     "  --version                                        Print the installed version",
 );
 
+const RUN_NOTICE: &str = "Unsupported on hosted Jio. Use jio create + jio exec.";
+
 const RUN_USAGE: &str = concat!(
     "usage: jio run <source> [options]\n",
+    "\n",
+    "Unsupported on hosted Jio. Use jio create + jio exec.\n",
     "\n",
     "  <source>                   Rust or Python source file\n",
     "  --language python          Treat <source> as inline Python\n",
@@ -154,7 +157,7 @@ fi
 
 _jio() {
   local -a commands agents shells options
-  commands=(run create config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion)
+  commands=(create config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion)
   agents=(codex)
   shells=(zsh bash fish)
 
@@ -207,7 +210,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
   command="${COMP_WORDS[1]}"
 
   if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=($(compgen -W 'run create config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion' -- "$current"))
+    COMPREPLY=($(compgen -W 'create config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion' -- "$current"))
     return
   fi
   if [[ $COMP_CWORD -eq 2 && ( $command == login || $command == yolo ) ]]; then
@@ -232,7 +235,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
 complete -F _jio_completion jio"#;
 
 const FISH_COMPLETION: &str = r#"complete -c jio -f
-complete -c jio -n '__fish_use_subcommand' -a 'run create config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion'
+complete -c jio -n '__fish_use_subcommand' -a 'create config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion'
 complete -c jio -n '__fish_seen_subcommand_from login yolo; and test (count (commandline -opc)) -eq 2' -a codex
 complete -c jio -n '__fish_seen_subcommand_from completion; and test (count (commandline -opc)) -eq 2' -a 'zsh bash fish'
 complete -c jio -n '__fish_seen_subcommand_from run' -l language -l instances -l concurrency -l host
@@ -330,7 +333,10 @@ fn execute(invocation: Invocation) -> io::Result<()> {
             host,
             instances,
             concurrency,
-        } => app::run(source, host, instances, concurrency),
+        } => {
+            eprintln!("jio: {RUN_NOTICE}");
+            app::run(source, host, instances, concurrency)
+        }
         Invocation::Create { host } => create(host),
         Invocation::Config => config::run(),
         Invocation::Usage { host } => session::usage(host),

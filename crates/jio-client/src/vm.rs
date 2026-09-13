@@ -528,7 +528,7 @@ impl VmClient {
         {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "this experimental build has no load-balancer SSH gateway; use an SSH host endpoint",
+                "this build has no load-balancer SSH gateway; use an SSH host endpoint",
             ));
         }
 

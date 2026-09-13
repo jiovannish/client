@@ -152,7 +152,10 @@ impl App {
             .unwrap_or_else(|| "running".into());
         frame.render_widget(
             Paragraph::new(vec![
-                Line::from(Span::styled(" JIO ", Style::new().black().on_cyan().bold())),
+                Line::from(vec![
+                    Span::styled(" JIO ", Style::new().black().on_cyan().bold()),
+                    Span::styled(format!("  {}", crate::RUN_NOTICE), Style::new().yellow()),
+                ]),
                 Line::from(vec![
                     Span::styled(" host ", Style::new().dark_gray()),
                     Span::raw(&self.host),

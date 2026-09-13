@@ -28,7 +28,7 @@ try {
 The Jio connection and public TLS certificate are built in; only an API key is
 needed. Hosted ephemeral sessions do not support stop/start.
 
-The current experimental transport supports macOS and Linux clients with
+The current transport supports macOS and Linux clients with
 OpenSSH installed. Standalone Core currently admits one operator-selected
 template; this package controls that VM and does not add or assume a guest
 language runtime.

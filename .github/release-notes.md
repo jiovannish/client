@@ -1,9 +1,9 @@
-Native Windows support and Ubuntu compatibility fixes.
+Clearer command discovery and Bun-based client tooling.
 
-- Install on Windows x64 from PowerShell or CMD, using Windows OpenSSH. No WSL is required.
-- Publish multiple VM ports without exhausting the small temporary filesystem in older Ubuntu templates.
-- On systemd templates with a renewal-capable Server, supervise each published port with a service that reconnects after a clean restart.
-- Use the guest home directory for `jio yolo codex`, accept shutdown reasons, and allow more time for clean stop and deletion.
+- Keep `jio run` available for compatible lab endpoints, while hiding it from the main help and command suggestions.
+- Explain that `jio run` is unsupported on hosted Jio and direct users to `jio create` and `jio exec`.
+- Simplify status wording in CLI messages and documentation while retaining the documented limitations.
+- Use Bun and TypeScript for repository tooling, packaging scripts and Node SDK checks.
 
 ## Install
 
@@ -31,6 +31,6 @@ Native binaries: macOS ARM64 and Intel (11+), Linux ARM64 and x86-64 (glibc 2.35
 
 Each archive includes the CLI, Apache-2.0 license, and dependency notices. Checksums detect download corruption; they are not independent publisher signatures. Node.js and Python SDKs remain source-build only.
 
-Jio remains experimental. Published app URLs are public; use application authentication for private content. Persistent port publication requires a compatible Server and systemd guest; older templates require republishing after restart.
+Published app URLs are public; use application authentication for private content. Persistent port publication requires a compatible Server and systemd guest; older templates require republishing after restart.
 
 [CLI guide](https://github.com/jiovannish/client/blob/main/docs/README.md) · [Security](https://github.com/jiovannish/client/blob/main/SECURITY.md) · [Code of Conduct](https://github.com/jiovannish/client/blob/main/CODE_OF_CONDUCT.md)
