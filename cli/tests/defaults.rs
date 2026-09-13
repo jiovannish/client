@@ -110,7 +110,7 @@ fn missing_openssh_reports_the_requirement_before_creating_a_vm() -> io::Result<
         let mut request = [0; 8192];
         let count = stream.read(&mut request)?;
         assert!(request[..count].starts_with(b"GET /v0/health "));
-        let body = r#"{"status":"experimental","sizes":["medium"]}"#;
+        let body = r#"{"status":"ready","sizes":["medium"]}"#;
         write!(
             stream,
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

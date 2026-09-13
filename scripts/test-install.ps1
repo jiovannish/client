@@ -36,7 +36,7 @@ try {
     & $installer
     & $installer # Updating an existing install is supported.
     $installed = "$env:JIO_INSTALL_DIR\jio.exe"
-    if ((& $installed --version) -ne 'jio 0.2.1') { throw 'Installed version mismatch' }
+    if ((& $installed --version) -ne 'jio 0.2.2') { throw 'Installed version mismatch' }
     $before = (Get-FileHash $installed).Hash
     foreach ($failure in @('checksum', 'download')) {
         $badChecksum = $failure -eq 'checksum'
@@ -48,9 +48,9 @@ try {
     }
     $env:JIO_TEST_BINARY = $installed
     $version = & powershell.exe -NoProfile -NonInteractive -Command '& $env:JIO_TEST_BINARY --version'
-    if ($LASTEXITCODE -ne 0 -or $version -ne 'jio 0.2.1') { throw 'PowerShell invocation failed' }
+    if ($LASTEXITCODE -ne 0 -or $version -ne 'jio 0.2.2') { throw 'PowerShell invocation failed' }
     $version = & cmd.exe /d /c '"%JIO_TEST_BINARY%" --version'
-    if ($LASTEXITCODE -ne 0 -or $version -ne 'jio 0.2.1') { throw 'CMD invocation failed' }
+    if ($LASTEXITCODE -ne 0 -or $version -ne 'jio 0.2.2') { throw 'CMD invocation failed' }
     Write-Host 'PASS: native PowerShell/CMD, paths with spaces, updates, checksum and download failures'
 } finally {
     $env:JIO_INSTALL_DIR = $originalDirectory

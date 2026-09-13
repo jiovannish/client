@@ -12,7 +12,7 @@ people's data. We will coordinate investigation and disclosure privately.
 
 Security fixes target the latest release. Upgrade before checking whether a
 previously reported issue is resolved. There is no long-term support commitment
-for older experimental releases.
+for older releases.
 
 Jio assumes a trusted host operator. See [current limitations](docs/limitations.md)
 for the execution and session boundaries.

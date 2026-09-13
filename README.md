@@ -37,7 +37,7 @@ Read the [CLI guide](docs/README.md) for commands, configuration, and examples.
 [Node.js](bindings/node/README.md) and [Python](bindings/python/README.md) SDKs
 are available to build from source.
 
-Jio is experimental. See [current limitations](docs/limitations.md).
+See [current limitations](docs/limitations.md).
 
 ## Contributing
 
