@@ -163,6 +163,7 @@ Escape goes back or exits. Changes apply to future VMs.
 | Small | 1 | 2 GiB |
 | Medium (default) | 2 | 4 GiB |
 | Large | 4 | 8 GiB |
+| X-Large | 8 | 16 GiB |
 
 Available profiles depend on the service and account quota. Unsupported sizes
 fail before creation; Jio does not silently choose a different size.

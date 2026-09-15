@@ -1,9 +1,7 @@
-Clearer command discovery and Bun-based client tooling.
+X-Large selection and cleaner terminal behavior in `jio config`.
 
-- Keep `jio run` available for compatible lab endpoints, while hiding it from the main help and command suggestions.
-- Explain that `jio run` is unsupported on hosted Jio and direct users to `jio create` and `jio exec`.
-- Simplify status wording in CLI messages and documentation while retaining the documented limitations.
-- Use Bun and TypeScript for repository tooling, packaging scripts and Node SDK checks.
+- Add X-Large (8 vCPU, 16 GiB) to the size menu, subject to endpoint availability and account quota.
+- Restore the cursor to the start of the prompt when closing the menu, without leaving blank lines or erasing terminal history.
 
 ## Install
 

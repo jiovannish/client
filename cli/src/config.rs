@@ -1,10 +1,11 @@
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use jio_client::VmSize;
+use ratatui::backend::Backend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
-use ratatui::{DefaultTerminal, Frame, TerminalOptions, Viewport};
+use ratatui::{DefaultTerminal, Frame, Terminal, TerminalOptions, Viewport};
 use std::env;
 use std::fs;
 #[cfg(unix)]
@@ -22,7 +23,7 @@ const CONFIG_FILE: &str = "config";
 const CREDENTIALS_FILE: &str = "credentials";
 const MAX_CREDENTIAL_BYTES: u64 = 4096;
 const MAX_CONFIG_BYTES: u64 = 128;
-const SIZES: [VmSize; 3] = [VmSize::Small, VmSize::Medium, VmSize::Large];
+const SIZES: [VmSize; 4] = VmSize::ALL;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Config {
@@ -99,12 +100,19 @@ pub fn run() -> io::Result<()> {
             viewport: Viewport::Inline(6),
         })?;
         let result = ConfigApp::new(config.size).run(&mut terminal, &store);
-        let clear = terminal.clear();
-        let cursor = terminal.show_cursor();
-        result.and(clear).and(cursor)
+        result.and(clear_inline(&mut terminal))
     })();
     let restore = crossterm::terminal::disable_raw_mode();
     result.and(restore)
+}
+
+fn clear_inline<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> {
+    let origin = terminal.get_frame().area().as_position();
+    let clear = terminal.clear();
+    // clear() preserves the last drawn cursor, which can sit on the footer.
+    let position = terminal.set_cursor_position(origin);
+    let cursor = terminal.show_cursor();
+    clear.and(position).and(cursor)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -574,5 +582,53 @@ mod tests {
         assert_eq!(size_detail(VmSize::Medium), "2 vCPU · 4 GiB");
         assert_eq!(size_detail(VmSize::Large), "4 vCPU · 8 GiB");
         assert_eq!(size_detail(VmSize::XLarge), "8 vCPU · 16 GiB");
+    }
+
+    #[test]
+    fn closing_returns_to_column_zero_without_blank_lines_or_erasing_history()
+    -> Result<(), std::convert::Infallible> {
+        use super::clear_inline;
+        use ratatui::backend::{Backend, TestBackend};
+        use ratatui::{Terminal, TerminalOptions, Viewport};
+
+        for row in [5, 18, 23] {
+            let mut backend = TestBackend::new(80, 24);
+            backend.draw([(0, row - 1, &ratatui::buffer::Cell::new("H"))].into_iter())?;
+            backend.set_cursor_position((0, row))?;
+            let mut terminal = Terminal::with_options(
+                backend,
+                TerminalOptions {
+                    viewport: Viewport::Inline(6),
+                },
+            )?;
+            let mut app = ConfigApp::new(VmSize::XLarge);
+            app.handle_key(KeyCode::Enter);
+            terminal.draw(|frame| app.draw(frame))?;
+            let origin = terminal.get_frame().area().as_position();
+            assert_eq!(terminal.backend().buffer()[(0, origin.y - 1)].symbol(), "H");
+            clear_inline(&mut terminal)?;
+            assert_eq!(terminal.get_cursor_position()?, origin);
+            assert_eq!(origin.x, 0);
+            assert!(terminal.backend().cursor_visible());
+            assert_eq!(terminal.backend().buffer()[(0, origin.y - 1)].symbol(), "H");
+            for y in origin.y..24 {
+                for x in 0..80 {
+                    assert_eq!(terminal.backend().buffer()[(x, y)].symbol(), " ");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn selects_xlarge_and_wraps_to_small() {
+        let mut app = ConfigApp::new(VmSize::Large);
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.handle_key(KeyCode::Enter), Action::Save(VmSize::XLarge));
+        let mut app = ConfigApp::new(VmSize::XLarge);
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.handle_key(KeyCode::Enter), Action::Save(VmSize::Small));
     }
 }
