@@ -437,14 +437,15 @@ fn create(host: String) -> io::Result<()> {
         let mut output = output.lock();
         writeln!(output, "Creating VM: {id}")?;
         prompt_connect(&mut input, &mut output)
-    })()?;
+    })();
     let accepted = receive_acceptance
         .recv()
         .map_err(|_| io::Error::other("session creation ended before Core accepted it"))??;
     if accepted != id {
         return Err(io::Error::other("accepted session ID changed"));
     }
-    if !connect {
+    // Finish acceptance and persist the session even if the prompt's I/O failed.
+    if !connect? {
         return Ok(());
     }
     receive_ready
@@ -914,26 +915,27 @@ fn prompt_yes_no(
         write!(output, "{prompt}")?;
         output.flush()?;
 
-        let mut answer = String::new();
-        let bytes = input.take(MAX_ANSWER_BYTES).read_line(&mut answer)?;
+        let mut answer = Vec::new();
+        let bytes = input
+            .take(MAX_ANSWER_BYTES)
+            .read_until(b'\n', &mut answer)?;
         if bytes == 0 {
             return Ok(false);
         }
-        if bytes == MAX_ANSWER_BYTES as usize && !answer.ends_with('\n') {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "answer is too long",
-            ));
+        if bytes == MAX_ANSWER_BYTES as usize && !answer.ends_with(b"\n") {
+            input.skip_until(b'\n')?;
+            writeln!(output, "Please answer Yes or No.")?;
+            continue;
         }
 
-        let answer = answer.trim();
+        let answer = answer.trim_ascii();
         if answer.is_empty() {
             return Ok(default);
         }
-        if answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes") {
+        if answer.eq_ignore_ascii_case(b"y") || answer.eq_ignore_ascii_case(b"yes") {
             return Ok(true);
         }
-        if answer.eq_ignore_ascii_case("n") || answer.eq_ignore_ascii_case("no") {
+        if answer.eq_ignore_ascii_case(b"n") || answer.eq_ignore_ascii_case(b"no") {
             return Ok(false);
         }
         writeln!(output, "Please answer Yes or No.")?;
@@ -1145,6 +1147,26 @@ mod tests {
                 Some("Do you want to connect now? [Y/n] ")
             );
         }
+    }
+
+    #[test]
+    fn discards_a_pasted_command_before_asking_again() -> std::io::Result<()> {
+        // Include UTF-8 split at the byte limit and a Yes at the end of the paste.
+        for paste in ["curl ".repeat(200), format!("{}é", "x".repeat(31))] {
+            for (next, expected) in [("yes\n", true), ("no\n", false), ("", false)] {
+                let answer = format!("{paste}yes\n{next}");
+                let mut input = Cursor::new(answer.as_bytes());
+                let mut output = Vec::new();
+                assert_eq!(prompt_connect(&mut input, &mut output)?, expected);
+                assert!(String::from_utf8_lossy(&output).contains("Please answer Yes or No.\n"));
+                let mut input = Cursor::new(answer.as_bytes());
+                assert_eq!(
+                    prompt_destroy(&mut input, &mut Vec::new(), "test")?,
+                    expected
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]
