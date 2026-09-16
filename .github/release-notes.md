@@ -1,7 +1,7 @@
-X-Large selection and cleaner terminal behavior in `jio config`.
+Keep newly created VMs selected when confirmation input fails.
 
-- Add X-Large (8 vCPU, 16 GiB) to the size menu, subject to endpoint availability and account quota.
-- Restore the cursor to the start of the prompt when closing the menu, without leaving blank lines or erasing terminal history.
+- Pasting an oversized answer into a confirmation prompt now asks again instead of aborting.
+- Finish saving an accepted VM before returning a connect-prompt input/output error, so it remains available to `jio connect` and `jio destroy`.
 
 ## Install
 

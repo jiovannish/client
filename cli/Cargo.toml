@@ -1,6 +1,6 @@
 [package]
 name = "jio-cli"
-version = "0.2.3"
+version = "0.2.4"
 edition.workspace = true
 rust-version = "1.88"
 publish.workspace = true
