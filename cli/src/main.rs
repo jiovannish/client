@@ -18,6 +18,7 @@ const USAGE: &str = concat!(
     "\n",
     "  Command   Arguments\n",
     "  create    [options]                              Create a persistent VM\n",
+    "  fork      [session-id] [options]                 Clone a running VM\n",
     "  config                                           Configure Jio defaults\n",
     "  expose    <port> [session-id] [--domain hostname] Publish an HTTP app\n",
     "  unexpose  <port> [session-id]                    Unpublish an app\n",
@@ -55,6 +56,14 @@ const CREATE_USAGE: &str = concat!(
     "usage: jio create [options]\n",
     "\n",
     "  --host <host>              Override JIO_ENDPOINT or JIO_HOST",
+);
+
+const FORK_USAGE: &str = concat!(
+    "usage: jio fork [session-id] [options]\n\n",
+    "  [session-id]               Source VM; defaults to the current session\n",
+    "  --host <host>              Override JIO_ENDPOINT or JIO_HOST\n\n",
+    "Clone a running VM with its files, processes and SSH keys. Selects the child.\n",
+    "Requires local source credentials and capacity for another VM of the same size.",
 );
 
 const ACCOUNT_USAGE: &str = concat!(
@@ -157,7 +166,7 @@ fi
 
 _jio() {
   local -a commands agents shells options
-  commands=(create config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion)
+  commands=(create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion)
   agents=(codex)
   shells=(zsh bash fish)
 
@@ -193,7 +202,7 @@ _jio() {
     destroy)
       options=(--yes --host --help -h)
       ;;
-    usage|list|create|connect|stop|start)
+    usage|list|create|fork|connect|stop|start)
       options=(--host --help -h)
       ;;
   esac
@@ -210,7 +219,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
   command="${COMP_WORDS[1]}"
 
   if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=($(compgen -W 'create config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion' -- "$current"))
+    COMPREPLY=($(compgen -W 'create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion' -- "$current"))
     return
   fi
   if [[ $COMP_CWORD -eq 2 && ( $command == login || $command == yolo ) ]]; then
@@ -227,7 +236,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
     run)       COMPREPLY=($(compgen -W '--language --instances --concurrency --host --help -h' -- "$current")) ;;
     exec)      COMPREPLY=($(compgen -W '--timeout --host --help -h' -- "$current")) ;;
     destroy)   COMPREPLY=($(compgen -W '--yes --host --help -h' -- "$current")) ;;
-    usage|list|login|yolo|create|connect|stop|start)
+    usage|list|login|yolo|create|fork|connect|stop|start)
                COMPREPLY=($(compgen -W '--host --help -h' -- "$current")) ;;
   esac
 }
@@ -235,13 +244,13 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
 complete -F _jio_completion jio"#;
 
 const FISH_COMPLETION: &str = r#"complete -c jio -f
-complete -c jio -n '__fish_use_subcommand' -a 'create config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion'
+complete -c jio -n '__fish_use_subcommand' -a 'create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion'
 complete -c jio -n '__fish_seen_subcommand_from login yolo; and test (count (commandline -opc)) -eq 2' -a codex
 complete -c jio -n '__fish_seen_subcommand_from completion; and test (count (commandline -opc)) -eq 2' -a 'zsh bash fish'
 complete -c jio -n '__fish_seen_subcommand_from run' -l language -l instances -l concurrency -l host
 complete -c jio -n '__fish_seen_subcommand_from exec' -l timeout -l host
 complete -c jio -n '__fish_seen_subcommand_from destroy' -l yes -l host
-complete -c jio -n '__fish_seen_subcommand_from usage list create connect stop start login yolo' -l host"#;
+complete -c jio -n '__fish_seen_subcommand_from usage list create fork connect stop start login yolo' -l host"#;
 
 enum Invocation {
     Ingress(ingress::Options),
@@ -255,6 +264,10 @@ enum Invocation {
     },
     Create {
         host: String,
+    },
+    Fork {
+        host: String,
+        id: Option<String>,
     },
     Config,
     Usage {
@@ -338,6 +351,7 @@ fn execute(invocation: Invocation) -> io::Result<()> {
             app::run(source, host, instances, concurrency)
         }
         Invocation::Create { host } => create(host),
+        Invocation::Fork { host, id } => fork(host, id.as_deref()),
         Invocation::Config => config::run(),
         Invocation::Usage { host } => session::usage(host),
         Invocation::List { host } => session::list(host),
@@ -454,6 +468,23 @@ fn create(host: String) -> io::Result<()> {
         .connect()
 }
 
+fn fork(host: String, source: Option<&str>) -> io::Result<()> {
+    let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let child = session::fork(host.clone(), source, |id| {
+        if interactive {
+            println!("Forking VM: {id}");
+        }
+    })?;
+    if !interactive {
+        println!("{}", child.session_id);
+        return Ok(());
+    }
+    if prompt_connect(&mut io::stdin().lock(), &mut io::stdout().lock())? {
+        session::connect(host, Some(&child.session_id))?;
+    }
+    Ok(())
+}
+
 fn destroy(host: String, id: Option<&str>, yes: bool) -> io::Result<()> {
     let id = session::target_session_id(&host, id)?;
     if !yes {
@@ -510,6 +541,12 @@ fn options_from(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
         }
         Some(command) if command == OsStr::new("list") => {
             host_options(arguments, LIST_USAGE, |host| Invocation::List { host })
+        }
+        Some(command) if command == OsStr::new("fork") => {
+            match optional_session_target(arguments, FORK_USAGE)? {
+                Some((host, id)) => Ok(Invocation::Fork { host, id }),
+                None => Ok(Invocation::Help(FORK_USAGE)),
+            }
         }
         Some(command) if command == OsStr::new("config") => config_options(arguments),
         Some(command) if command == OsStr::new("connect") => connect_options(arguments),
@@ -950,8 +987,9 @@ fn usage(message: &'static str) -> io::Error {
 mod tests {
     use super::{
         ACCOUNT_USAGE, COMPLETION_USAGE, CONFIG_USAGE, CONNECT_USAGE, CREATE_USAGE,
-        CompletionShell, DESTROY_USAGE, EXEC_USAGE, Invocation, LIST_USAGE, LOGIN_USAGE, RUN_USAGE,
-        START_USAGE, STOP_USAGE, USAGE, YOLO_USAGE, options_from, prompt_connect, prompt_destroy,
+        CompletionShell, DESTROY_USAGE, EXEC_USAGE, FORK_USAGE, Invocation, LIST_USAGE,
+        LOGIN_USAGE, RUN_USAGE, START_USAGE, STOP_USAGE, USAGE, YOLO_USAGE, options_from,
+        prompt_connect, prompt_destroy,
     };
     use std::ffi::OsString;
     use std::io::Cursor;
@@ -1019,6 +1057,33 @@ mod tests {
             invocation,
             Ok(Invocation::Connect { id: None, .. })
         ));
+    }
+
+    #[test]
+    fn fork_accepts_an_explicit_or_current_source() {
+        assert!(matches!(
+            options_from(arguments("fork")),
+            Ok(Invocation::Fork { id: Some(_), .. })
+        ));
+        assert!(matches!(
+            options_from(
+                ["fork", "--host", "ubuntu@host"]
+                    .into_iter()
+                    .map(OsString::from)
+            ),
+            Ok(Invocation::Fork { id: None, .. })
+        ));
+        assert!(options_from(["fork", "invalid"].into_iter().map(OsString::from)).is_err());
+        assert!(
+            options_from(["fork", "--size", "xlarge"].into_iter().map(OsString::from)).is_err()
+        );
+        for shell in [
+            CompletionShell::Zsh,
+            CompletionShell::Bash,
+            CompletionShell::Fish,
+        ] {
+            assert!(shell.script().contains("create fork config"));
+        }
     }
 
     #[test]
@@ -1234,6 +1299,7 @@ mod tests {
         for (command, expected) in [
             ("run", RUN_USAGE),
             ("create", CREATE_USAGE),
+            ("fork", FORK_USAGE),
             ("usage", ACCOUNT_USAGE),
             ("list", LIST_USAGE),
             ("config", CONFIG_USAGE),

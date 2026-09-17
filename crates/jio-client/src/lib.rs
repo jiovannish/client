@@ -675,6 +675,41 @@ impl SessionClient {
         }
     }
 
+    /// Clones a ready session at the expected generation into a caller-reserved ID.
+    /// The child inherits the source's memory, services, files and SSH authority.
+    pub fn fork(&self, source: &str, id: &str, source_generation: u64) -> io::Result<Session> {
+        if !valid_session_id(source)
+            || !valid_session_id(id)
+            || source == id
+            || source_generation == 0
+        {
+            return Err(invalid("invalid fork identity"));
+        }
+        let connection = self.connection()?;
+        let response = connection
+            .client
+            .post(format!("{}/v0/sessions/{source}/fork", connection.base_url))
+            .bearer_auth(&connection.api_key)
+            .timeout(CREATE_SESSION_TIMEOUT)
+            .header(CONTENT_TYPE, "application/json")
+            .body(
+                serde_json::to_vec(&serde_json::json!({
+                    "session_id": id, "source_generation": source_generation
+                }))
+                .map_err(other)?,
+            )
+            .send()
+            .map_err(other)?;
+        match decode_session_response(response, Some(id), None)? {
+            SessionResponse::Complete(session)
+                if session.state == SessionState::Ready && session.generation == 1 =>
+            {
+                Ok(*session)
+            }
+            _ => Err(invalid("endpoint did not complete session fork")),
+        }
+    }
+
     pub fn stop(&self, id: &str) -> io::Result<Session> {
         self.lifecycle(id, "stop", CREATE_SESSION_TIMEOUT, SessionState::Stopped)
     }

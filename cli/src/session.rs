@@ -120,6 +120,14 @@ pub fn create(host: String, size: VmSize) -> io::Result<Session> {
     Ok(session)
 }
 
+pub fn fork(host: String, id: Option<&str>, report: impl FnOnce(&str)) -> io::Result<Session> {
+    let client = client(host)?;
+    let source = resolve_session_id(&client, id)?;
+    let session = client.fork_and_report_id(&source, report)?.session();
+    client.set_current_session_id(&session.session_id)?;
+    Ok(session)
+}
+
 pub fn accept_create_and_report_id(
     host: String,
     size: VmSize,

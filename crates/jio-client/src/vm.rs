@@ -224,7 +224,7 @@ impl VmClient {
         let temporary = temporary_directory(&self.sessions)?;
         let result = self.create_inner(contract, size, &id, &temporary);
         let result = if contract.caller_assigns_id() {
-            result.map_err(|error| self.retain_failed_create(&id, &temporary, error))
+            result.map_err(|error| self.retain_failed_creation("create", &id, &temporary, error))
         } else {
             result
         };
@@ -236,6 +236,72 @@ impl VmClient {
             report(&vm.id());
         }
         Ok(vm)
+    }
+
+    /// Forks a running VM, retaining its files, processes and SSH authority.
+    /// Local credentials for the source are required. This does not select a CLI default.
+    pub fn fork(&self, source_id: &str) -> io::Result<Vm> {
+        self.fork_and_report_id(source_id, |_| {})
+    }
+
+    /// Forks a VM and reports the child ID before sending the request.
+    /// If the response is lost, credentials remain available under that ID.
+    pub fn fork_and_report_id(&self, source_id: &str, report: impl FnOnce(&str)) -> io::Result<Vm> {
+        let (source, credentials) = self.ready_session(source_id)?;
+        let id = random_session_id()?;
+        let target = self.session_directory(&id)?;
+        if target.try_exists()? {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "generated session ID already exists locally",
+            ));
+        }
+        let temporary = temporary_directory(&self.sessions)?;
+        let prepare = (|| -> io::Result<()> {
+            write_private_file(
+                &temporary.join(PRIVATE_KEY),
+                &read_bounded(&credentials.private_key, MAX_LOCAL_TEXT_BYTES)?,
+            )?;
+            write_known_hosts(
+                &temporary.join(KNOWN_HOSTS),
+                &id,
+                &source.ssh_host_public_key,
+            )?;
+            persist_requested_size(&temporary, source.size)?;
+            crate::sync_directory(&temporary)?;
+            fs::rename(&temporary, &target)?;
+            crate::sync_directory(&self.sessions)
+        })();
+        if let Err(error) = prepare {
+            let _ = remove_session_files(&temporary);
+            return Err(error);
+        }
+        report(&id);
+        let result = (|| {
+            let session = self.api.fork(source_id, &id, source.generation)?;
+            if session.runtime != source.runtime
+                || session.system_files_volume_id.is_some()
+                    != source.system_files_volume_id.is_some()
+                || session.template_id != source.template_id
+                || session.core_sha256 != source.core_sha256
+                || session.size != source.size
+                || session.vcpu_count != source.vcpu_count
+                || session.memory_mib != source.memory_mib
+                || session.guest_ipv4 == source.guest_ipv4
+                || session.volume_id == source.volume_id
+                || (source.system_files_volume_id.is_some()
+                    && session.system_files_volume_id == source.system_files_volume_id)
+            {
+                return Err(invalid_data("endpoint returned inconsistent fork identity"));
+            }
+            self.credentials(&session)?;
+            Ok(Vm {
+                owner: self.clone(),
+                session: Arc::new(RwLock::new(session)),
+                transport: Arc::new(Mutex::new(None)),
+            })
+        })();
+        result.map_err(|error| self.retain_failed_creation("fork", &id, &temporary, error))
     }
 
     /// Starts creating a VM and returns once Core owns the in-progress session.
@@ -278,10 +344,16 @@ impl VmClient {
         report(&id);
         let temporary = temporary_directory(&self.sessions)?;
         self.accept_create_inner(&contract, size, &id, &temporary)
-            .map_err(|error| self.retain_failed_create(&id, &temporary, error))
+            .map_err(|error| self.retain_failed_creation("create", &id, &temporary, error))
     }
 
-    fn retain_failed_create(&self, id: &str, temporary: &Path, error: io::Error) -> io::Error {
+    fn retain_failed_creation(
+        &self,
+        action: &str,
+        id: &str,
+        temporary: &Path,
+        error: io::Error,
+    ) -> io::Error {
         // A lost/rejected response is not proof that Core never accepted create.
         // Keep authority under the caller-reserved ID, including for synchronous SDK callers.
         let saved = (|| -> io::Result<()> {
@@ -300,13 +372,13 @@ impl VmClient {
             Ok(()) => io::Error::new(
                 error.kind(),
                 format!(
-                    "create {id}: {error}; local state retained; inspect or destroy this ID before retrying"
+                    "{action} {id}: {error}; local state retained; inspect or destroy this ID before retrying"
                 ),
             ),
             Err(save) => io::Error::new(
                 error.kind(),
                 format!(
-                    "create {id}: {error}; recover local authority at {} ({save})",
+                    "{action} {id}: {error}; recover local authority at {} ({save})",
                     temporary.display()
                 ),
             ),
@@ -1869,13 +1941,173 @@ mod tests {
     }
 
     #[test]
+    fn fork_preserves_authority_before_request_and_after_lost_response() -> io::Result<()> {
+        use std::io::{BufRead, Read, Write};
+        use std::time::{Duration, Instant};
+        for outcome in ["success", "lost", "wrong-key", "wrong-volume"] {
+            let root = std::env::temp_dir().join(format!("jio-fork-test-{}", random_session_id()?));
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            listener.set_nonblocking(true)?;
+            let client = VmClient::with_state_directory(
+                format!("http://{}", listener.local_addr()?),
+                API_KEY,
+                &root,
+            )?;
+            let mut source = ready_session();
+            source.size = Some(VmSize::Medium);
+            source.ssh_host_public_key =
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f"
+                    .into();
+            crate::validate_session(&source)?;
+            let directory = client.session_directory(&source.session_id)?;
+            create_private_directory(&directory)?;
+            super::write_private_file(
+                &directory.join(super::PRIVATE_KEY),
+                b"source-test-authority",
+            )?;
+            write_known_hosts(
+                &directory.join(super::KNOWN_HOSTS),
+                &source.session_id,
+                &source.ssh_host_public_key,
+            )?;
+            client.set_current_session_id(&source.session_id)?;
+            let saved_source = source.clone();
+            let saved_root = root.clone();
+            let server = std::thread::spawn(move || -> io::Result<()> {
+                for index in 0..2 {
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    let socket = loop {
+                        match listener.accept() {
+                            Ok((socket, _)) => break socket,
+                            Err(error)
+                                if error.kind() == io::ErrorKind::WouldBlock
+                                    && Instant::now() < deadline =>
+                            {
+                                std::thread::sleep(Duration::from_millis(5))
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    };
+                    socket.set_nonblocking(false)?;
+                    socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+                    let mut reader = io::BufReader::new(socket);
+                    let mut headers = String::new();
+                    let mut length = 0;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line)? == 0 || line == "\r\n" {
+                            break;
+                        }
+                        if let Some(value) =
+                            line.to_ascii_lowercase().strip_prefix("content-length:")
+                        {
+                            length = value.trim().parse::<usize>().map_err(io::Error::other)?;
+                        }
+                        headers.push_str(&line);
+                        assert!(headers.len() < 8192 && length < 4096);
+                    }
+                    assert!(
+                        headers
+                            .to_ascii_lowercase()
+                            .contains(&format!("authorization: bearer {API_KEY}\r\n"))
+                    );
+                    let mut view = saved_source.clone();
+                    if index == 0 {
+                        assert!(headers.starts_with(&format!(
+                            "GET /v0/sessions/{} ",
+                            saved_source.session_id
+                        )));
+                    } else {
+                        assert!(headers.starts_with(&format!(
+                            "POST /v0/sessions/{}/fork ",
+                            saved_source.session_id
+                        )));
+                        let mut body = vec![0; length];
+                        reader.read_exact(&mut body)?;
+                        let body: serde_json::Value = serde_json::from_slice(&body)?;
+                        assert_eq!(body["source_generation"], 1);
+                        let id = body["session_id"]
+                            .as_str()
+                            .ok_or_else(|| io::Error::other("missing child ID"))?;
+                        assert_ne!(id, saved_source.session_id);
+                        let child = saved_root.join("sessions").join(id);
+                        assert_eq!(
+                            std::fs::read(child.join(super::PRIVATE_KEY))?,
+                            b"source-test-authority"
+                        );
+                        require_private_file(&child.join(super::PRIVATE_KEY))?;
+                        assert_eq!(
+                            std::fs::read_to_string(child.join(super::KNOWN_HOSTS))?,
+                            super::known_hosts_line(id, &saved_source.ssh_host_public_key)
+                        );
+                        if outcome == "lost" {
+                            return Ok(());
+                        }
+                        view.session_id = id.into();
+                        view.guest_ipv4 = Ipv4Addr::new(10, 0, 0, 6);
+                        view.volume_id = "11".repeat(16);
+                        view.system_files_volume_id = Some("22".repeat(16));
+                        if outcome == "wrong-key" {
+                            view.ssh_host_public_key =
+                                view.ssh_host_public_key.replace("HR4f", "HR4e");
+                        }
+                        if outcome == "wrong-volume" {
+                            view.volume_id = saved_source.volume_id.clone();
+                        }
+                    }
+                    let body = serde_json::to_string(&view)?;
+                    write!(
+                        reader.get_mut(),
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )?;
+                }
+                Ok(())
+            });
+            let mut child_id = String::new();
+            let result = client.fork_and_report_id(&source.session_id, |id| child_id = id.into());
+            server
+                .join()
+                .map_err(|_| io::Error::other("test server failed"))??;
+            if outcome == "success" {
+                assert_eq!(result?.id(), child_id);
+            } else {
+                let error = result
+                    .err()
+                    .ok_or_else(|| io::Error::other("fork should fail"))?;
+                assert!(error.to_string().contains(&format!("fork {child_id}:")));
+                assert!(error.to_string().contains("local state retained"));
+            }
+            assert_eq!(
+                client.current_session_id()?.as_deref(),
+                Some(source.session_id.as_str())
+            );
+            assert_eq!(
+                std::fs::read(directory.join(super::PRIVATE_KEY))?,
+                b"source-test-authority"
+            );
+            assert_eq!(
+                std::fs::read(
+                    client
+                        .session_directory(&child_id)?
+                        .join(super::PRIVATE_KEY)
+                )?,
+                b"source-test-authority"
+            );
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn uncertain_create_retains_local_authority_and_reports_the_id() -> io::Result<()> {
         let root = std::env::temp_dir().join(format!("jio-pending-test-{}", random_session_id()?));
         let client = VmClient::with_state_directory("http://127.0.0.1:8080", API_KEY, &root)?;
         let pending = super::temporary_directory(&client.sessions)?;
         super::write_private_file(&pending.join(super::PRIVATE_KEY), b"test-private-authority")?;
         let id = random_session_id()?;
-        let error = client.retain_failed_create(
+        let error = client.retain_failed_creation(
+            "create",
             &id,
             &pending,
             io::Error::new(io::ErrorKind::ConnectionReset, "response lost"),
