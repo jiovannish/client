@@ -1,6 +1,4 @@
-use crate::{
-    Connection, DEFAULT_REQUEST_TIMEOUT, SessionClient, decode, invalid, other, valid_session_id,
-};
+use crate::{DEFAULT_REQUEST_TIMEOUT, SessionClient, decode, invalid, other, valid_session_id};
 use serde::Deserialize;
 use std::{io, time::Instant};
 
@@ -35,7 +33,7 @@ impl SessionClient {
     /// Lists non-destroyed VMs belonging to the authenticated account.
     /// Local SSH keys are not required. Standalone Core does not offer this route.
     pub fn list(&self) -> io::Result<Vec<VmSummary>> {
-        let connection = Connection::open(&self.endpoint, &self.api_key, DEFAULT_REQUEST_TIMEOUT)?;
+        let connection = self.connection()?;
         let started = Instant::now();
         let mut after = String::new();
         let mut summaries = Vec::new();
