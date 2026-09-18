@@ -32,7 +32,11 @@ If your shell cannot find `jio`, add this to your shell configuration:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Rerun the installer to update. It preserves API keys, VM keys, and configuration.
+Run `jio update` to install the latest CLI release in the current executable's
+directory. It uses the release installer, verifies the archive checksum and binary
+version, and preserves API keys, VM keys, and configuration. The directory must be
+writable. Older clients without this command can rerun the installer.
+
 To choose another install location:
 
 ```sh
