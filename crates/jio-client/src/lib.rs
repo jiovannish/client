@@ -325,6 +325,8 @@ struct ErrorResponse {
 pub struct SessionClient {
     endpoint: String,
     api_key: String,
+    // Clones share reqwest's connection pool, scoped to this endpoint/client.
+    http: Client,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -477,16 +479,25 @@ impl SessionClient {
         if !valid_api_key(&api_key) {
             return Err(invalid("API key must contain 32..=256 visible ASCII bytes"));
         }
-        Ok(Self { endpoint, api_key })
+        let http = Connection::http_client(&endpoint, DEFAULT_REQUEST_TIMEOUT)?;
+        Ok(Self {
+            endpoint,
+            api_key,
+            http,
+        })
     }
 
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
+    fn connection(&self) -> io::Result<Connection> {
+        Connection::with_client(&self.endpoint, &self.api_key, self.http.clone())
+    }
+
     /// Reads the current API key's shared account quota from a hosted control plane.
     pub fn usage(&self) -> io::Result<AccountUsage> {
-        let connection = Connection::open(&self.endpoint, &self.api_key, DEFAULT_REQUEST_TIMEOUT)?;
+        let connection = self.connection()?;
         let response = connection
             .client
             .get(format!("{}/v1/usage", connection.base_url))
@@ -544,7 +555,7 @@ impl SessionClient {
     }
 
     pub(crate) fn create_contract(&self) -> io::Result<CreateContract> {
-        let connection = Connection::open(&self.endpoint, &self.api_key, DEFAULT_REQUEST_TIMEOUT)?;
+        let connection = self.connection()?;
         let response = connection
             .client
             .get(format!("{}/v0/health", connection.base_url))
@@ -612,13 +623,14 @@ impl SessionClient {
         } else {
             CREATE_SESSION_TIMEOUT
         };
-        let connection = Connection::open(&self.endpoint, &self.api_key, timeout)?;
+        let connection = self.connection()?;
         let size = contract.request_size(size)?;
         let body = encode_create_request(contract, id, client_public_key, size)?;
         let mut request = connection
             .client
             .post(format!("{}/v0/sessions", connection.base_url))
             .bearer_auth(&connection.api_key)
+            .timeout(timeout)
             .header(CONTENT_TYPE, "application/json")
             .body(body);
         if asynchronous {
@@ -632,8 +644,8 @@ impl SessionClient {
         if !valid_session_id(id) {
             return Err(invalid("session ID is invalid"));
         }
-        let connection = Connection::open(&self.endpoint, &self.api_key, DEFAULT_REQUEST_TIMEOUT)?;
-        match get_session_response(&connection, id)? {
+        let connection = self.connection()?;
+        match get_session_response(&connection, id, DEFAULT_REQUEST_TIMEOUT)? {
             SessionResponse::Complete(session) => Ok(*session),
             SessionResponse::Starting => Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -646,10 +658,10 @@ impl SessionClient {
         if !valid_session_id(id) {
             return Err(invalid("session ID is invalid"));
         }
-        let connection = Connection::open(&self.endpoint, &self.api_key, CREATE_SESSION_TIMEOUT)?;
+        let connection = self.connection()?;
         let started = Instant::now();
         loop {
-            match get_session_response(&connection, id)? {
+            match get_session_response(&connection, id, CREATE_SESSION_TIMEOUT)? {
                 SessionResponse::Complete(session) => return Ok(*session),
                 SessionResponse::Starting => {}
             }
@@ -660,6 +672,41 @@ impl SessionClient {
                 ));
             }
             thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Clones a ready session at the expected generation into a caller-reserved ID.
+    /// The child inherits the source's memory, services, files and SSH authority.
+    pub fn fork(&self, source: &str, id: &str, source_generation: u64) -> io::Result<Session> {
+        if !valid_session_id(source)
+            || !valid_session_id(id)
+            || source == id
+            || source_generation == 0
+        {
+            return Err(invalid("invalid fork identity"));
+        }
+        let connection = self.connection()?;
+        let response = connection
+            .client
+            .post(format!("{}/v0/sessions/{source}/fork", connection.base_url))
+            .bearer_auth(&connection.api_key)
+            .timeout(CREATE_SESSION_TIMEOUT)
+            .header(CONTENT_TYPE, "application/json")
+            .body(
+                serde_json::to_vec(&serde_json::json!({
+                    "session_id": id, "source_generation": source_generation
+                }))
+                .map_err(other)?,
+            )
+            .send()
+            .map_err(other)?;
+        match decode_session_response(response, Some(id), None)? {
+            SessionResponse::Complete(session)
+                if session.state == SessionState::Ready && session.generation == 1 =>
+            {
+                Ok(*session)
+            }
+            _ => Err(invalid("endpoint did not complete session fork")),
         }
     }
 
@@ -675,11 +722,12 @@ impl SessionClient {
         if !valid_session_id(id) {
             return Err(invalid("session ID is invalid"));
         }
-        let connection = Connection::open(&self.endpoint, &self.api_key, CREATE_SESSION_TIMEOUT)?;
+        let connection = self.connection()?;
         let response = connection
             .client
             .delete(format!("{}/v0/sessions/{id}", connection.base_url))
             .bearer_auth(&connection.api_key)
+            .timeout(CREATE_SESSION_TIMEOUT)
             .send()
             .map_err(other)?;
         if response.status() == StatusCode::NO_CONTENT || response.status() == StatusCode::NOT_FOUND
@@ -700,7 +748,7 @@ impl SessionClient {
         if !valid_session_id(id) {
             return Err(invalid("session ID is invalid"));
         }
-        let connection = Connection::open(&self.endpoint, &self.api_key, timeout)?;
+        let connection = self.connection()?;
         let generation = self.get(id)?.generation;
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(io::Error::other)?;
@@ -708,6 +756,7 @@ impl SessionClient {
             .client
             .post(format!("{}/v0/sessions/{id}/{action}", connection.base_url))
             .bearer_auth(&connection.api_key)
+            .timeout(timeout)
             .header("if-match", generation)
             .header("idempotency-key", format!("{:x}", Sha256::digest(random)))
             .send()
@@ -776,11 +825,16 @@ fn encode_create_request(
     .map_err(other)
 }
 
-fn get_session_response(connection: &Connection, id: &str) -> io::Result<SessionResponse> {
+fn get_session_response(
+    connection: &Connection,
+    id: &str,
+    timeout: Duration,
+) -> io::Result<SessionResponse> {
     let response = connection
         .client
         .get(format!("{}/v0/sessions/{id}", connection.base_url))
         .bearer_auth(&connection.api_key)
+        .timeout(timeout)
         .send()
         .map_err(other)?;
     decode_session_response(response, Some(id), None)
@@ -1033,6 +1087,10 @@ struct Connection {
 
 impl Connection {
     fn open(endpoint: &str, api_key: &str, timeout: Duration) -> io::Result<Self> {
+        Self::with_client(endpoint, api_key, Self::http_client(endpoint, timeout)?)
+    }
+
+    fn http_client(endpoint: &str, timeout: Duration) -> io::Result<Client> {
         let mut builder = Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -1041,7 +1099,10 @@ impl Connection {
         if let Some(ca) = custom_ca(endpoint)? {
             builder = builder.add_root_certificate(ca);
         }
-        let client = builder.build().map_err(other)?;
+        builder.build().map_err(other)
+    }
+
+    fn with_client(endpoint: &str, api_key: &str, client: Client) -> io::Result<Self> {
         let (base_url, tunnel) = if is_url(endpoint) {
             (endpoint.trim_end_matches('/').to_owned(), None)
         } else {
@@ -1384,6 +1445,56 @@ fn other(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cloned_clients_reuse_the_authenticated_http_connection() -> std::io::Result<()> {
+        use std::io::{BufRead, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let session = persistent_session();
+        let id = session.session_id.clone();
+        let body = serde_json::to_string(&session)?;
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let (stream, _) = listener.accept()?;
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+            let mut stream = std::io::BufReader::new(stream);
+            for _ in 0..2 {
+                let mut headers = String::new();
+                loop {
+                    let mut line = String::new();
+                    if stream.read_line(&mut line)? == 0 {
+                        return Err(std::io::Error::other("HTTP connection was not reused"));
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                    headers.push_str(&line);
+                    assert!(headers.len() < 8192);
+                }
+                assert!(headers.starts_with(&format!("GET /v0/sessions/{id} HTTP/1.1\r\n")));
+                assert!(
+                    headers
+                        .to_ascii_lowercase()
+                        .contains(&format!("authorization: bearer {}\r\n", "a".repeat(64)))
+                );
+                write!(
+                    stream.get_mut(),
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )?;
+            }
+            Ok(())
+        });
+        let client = SessionClient::new(endpoint, "a".repeat(64))?;
+        let first = client.get(&session.session_id);
+        let second = client.clone().get(&session.session_id);
+        server
+            .join()
+            .map_err(|_| std::io::Error::other("test server failed"))??;
+        assert_eq!(first?.session_id, session.session_id);
+        assert_eq!(second?.session_id, session.session_id);
+        Ok(())
+    }
+
     #[test]
     fn built_in_trust_is_scoped_and_explicit_connections_are_validated() -> std::io::Result<()> {
         use super::{DEFAULT_ENDPOINT, JIO_CA, connection_ca, resolve_endpoint};

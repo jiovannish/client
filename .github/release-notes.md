@@ -1,7 +1,10 @@
-Keep newly created VMs selected when confirmation input fails.
+Clone a running VM with `jio fork`, preserving its processes and files.
 
-- Pasting an oversized answer into a confirmation prompt now asks again instead of aborting.
-- Finish saving an accepted VM before returning a connect-prompt input/output error, so it remains available to `jio connect` and `jio destroy`.
+- Fork the current VM or pass a source ID; the child gets a new VM ID and network address.
+- Preserve local SSH credentials before sending the fork request, including when the response is lost.
+- Reuse HTTP connections across session operations.
+
+Fork requires a compatible Server and worker, local source credentials, and capacity for a second VM. It stays on the same worker and currently supports non-expiring accounts only. Application credentials and SSH keys are inherited; external connections may need to reconnect.
 
 ## Install
 

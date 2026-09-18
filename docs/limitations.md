@@ -11,6 +11,9 @@ promise, and this release is not a production-readiness claim.
 - On retained-session endpoints, clean stop/start preserves files. Recovery
   across a Core or host restart, process checkpoints, and recovery of running
   services are not supported.
+- Running-session fork stays on the source worker and inherits SSH keys and
+  application credentials. Hosted expiring sessions cannot be forked. Public
+  ingress mappings and external connection continuity are not inherited.
 - A command timeout terminates the local SSH process. It does not guarantee
   cancellation of the guest process. Failed commands are not replayed automatically.
 - Standalone Core uses one operator-selected template and does not expose hosted

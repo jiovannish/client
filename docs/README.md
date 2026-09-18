@@ -130,6 +130,29 @@ creating another. A connection failure does not mean creation failed.
 `jio list` includes starting and stopped VMs. Listing needs an API key;
 connecting also needs the VM's local credentials on the machine that created it.
 
+### Fork a running VM
+
+```sh
+jio fork                 # Fork the current VM
+jio fork <session-id>    # Fork a specific running VM
+```
+
+The child inherits the source's files, running processes, VM size and SSH keys,
+gets a new VM ID and network address, and becomes the current session after
+success. The source remains running. Interactive use asks whether to connect;
+redirected output contains only the child ID, so scripts can use
+`child="$(jio fork "$source")"`.
+
+Fork requires the source's local SSH credentials and enough account and worker
+capacity for a second VM of the same size. Hosted fork initially supports
+non-expiring accounts and sessions only, on workers with fork support. Existing
+application credentials are copied with the VM; public ingress mappings are not.
+Existing external connections may need to reconnect.
+
+If the response is lost, the error reports the child ID and its credentials are
+retained locally. Inspect it with `jio list`, connect, or destroy that ID before
+requesting another fork.
+
 ### Cleanup
 
 ```sh

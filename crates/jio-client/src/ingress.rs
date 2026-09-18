@@ -45,11 +45,12 @@ impl SessionClient {
         path: &str,
         body: Option<Value>,
     ) -> io::Result<Value> {
-        let connection = Connection::open(&self.endpoint, &self.api_key, Duration::from_secs(30))?;
+        let connection = self.connection()?;
         let mut request = connection
             .client
             .request(method, format!("{}{path}", connection.base_url))
-            .bearer_auth(&self.api_key);
+            .bearer_auth(&self.api_key)
+            .timeout(Duration::from_secs(30));
         if let Some(body) = body {
             request = request
                 .header(CONTENT_TYPE, "application/json")
