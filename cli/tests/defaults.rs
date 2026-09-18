@@ -190,11 +190,13 @@ fn login_persists_verified_credentials_and_fails_closed() -> io::Result<()> {
     let endpoint = format!("http://{}", listener.local_addr()?);
     let key = "a".repeat(64);
     let replacement = "b".repeat(64);
+    let ports_path = format!("/v1/sessions/{}/ports", "e".repeat(32));
     let server = std::thread::spawn(move || -> io::Result<()> {
         for (path, key, status) in [
             ("/v1/usage", 'a', 200), // Login verifies the argument, not JIO_API_KEY.
             ("/v1/usage", 'a', 200), // A later process uses the saved key.
             ("/v1/sessions", 'a', 200),
+            (ports_path.as_str(), 'a', 200),
             ("/v1/usage", 'b', 401), // Failed login preserves the saved key.
             ("/v1/usage", 'b', 200), // Environment overrides the saved key.
             ("/v1/usage", 'b', 200), // Successful replacement.
@@ -234,6 +236,8 @@ fn login_persists_verified_credentials_and_fails_closed() -> io::Result<()> {
                 r#"{"error":"invalid API key"}"#
             } else if path == "/v1/sessions" {
                 r#"{"sessions":[],"next_after":null}"#
+            } else if path.ends_with("/ports") {
+                "[]"
             } else {
                 r#"{"account_id":"demo","limits":{"cpu":8,"memory_mib":16384,"disk_mib":131072},"reserved":{"cpu":0,"memory_mib":0,"disk_mib":0},"compute_sessions":0,"retained_sessions":0,"session_ttl_seconds":1800}"#
             };
@@ -279,6 +283,15 @@ fn login_persists_verified_credentials_and_fails_closed() -> io::Result<()> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    jio_client::VmClient::with_state_directory(&endpoint, &key, &directory.0)?
+        .set_current_session_id(&"e".repeat(32))?;
+    let output = directory.command(&endpoint).arg("ports").output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"No exposed ports.\n");
     for invalid in [
         "short".to_owned(),
         "x".repeat(257),

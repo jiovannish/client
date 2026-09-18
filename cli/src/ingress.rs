@@ -122,7 +122,11 @@ pub fn run(options: Options) -> io::Result<()> {
         "ports" => {
             let id =
                 crate::session::target_session_id(&options.host, args.first().map(String::as_str))?;
-            for p in api.ports(&id)? {
+            let ports = api.ports(&id)?;
+            if ports.is_empty() {
+                println!("No exposed ports.");
+            }
+            for p in ports {
                 println!("{}\t{}\t{}", p.port, p.status, p.url);
             }
         }

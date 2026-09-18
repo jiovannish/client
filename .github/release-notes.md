@@ -1,10 +1,4 @@
-Clone a running VM with `jio fork`, preserving its processes and files.
-
-- Fork the current VM or pass a source ID; the child gets a new VM ID and network address.
-- Preserve local SSH credentials before sending the fork request, including when the response is lost.
-- Reuse HTTP connections across session operations.
-
-Fork requires a compatible Server and worker, local source credentials, and capacity for a second VM. It stays on the same worker and currently supports non-expiring accounts only. Application credentials and SSH keys are inherited; external connections may need to reconnect.
+`jio ports` now prints **No exposed ports.** when the current or specified VM has no published ports.
 
 ## Install
 
@@ -34,4 +28,4 @@ Each archive includes the CLI, Apache-2.0 license, and dependency notices. Check
 
 Published app URLs are public; use application authentication for private content. Persistent port publication requires a compatible Server and systemd guest; older templates require republishing after restart.
 
-[CLI guide](https://github.com/jiovannish/client/blob/main/docs/README.md) · [Security](https://github.com/jiovannish/client/blob/main/SECURITY.md) · [Code of Conduct](https://github.com/jiovannish/client/blob/main/CODE_OF_CONDUCT.md)
+[CLI guide](https://github.com/jiovannish/client/blob/v0.3.1/docs/README.md) · [Security](https://github.com/jiovannish/client/blob/v0.3.1/SECURITY.md) · [Code of Conduct](https://github.com/jiovannish/client/blob/v0.3.1/CODE_OF_CONDUCT.md)

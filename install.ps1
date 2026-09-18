@@ -2,7 +2,7 @@
 # Invoke only after the complete script has downloaded.
 function Install-Jio {
     $ErrorActionPreference = 'Stop'
-    $version = '0.3.0'
+    $version = '0.3.1'
     if ([Environment]::OSVersion.Platform -ne 'Win32NT') { throw 'Use install.sh on macOS or Linux.' }
     if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') {
         throw 'This release supports native Windows x64.'
