@@ -51,7 +51,22 @@ try {
     if ($LASTEXITCODE -ne 0 -or $version -ne 'jio 0.3.1') { throw 'PowerShell invocation failed' }
     $version = & cmd.exe /d /c '"%JIO_TEST_BINARY%" --version'
     if ($LASTEXITCODE -ne 0 -or $version -ne 'jio 0.3.1') { throw 'CMD invocation failed' }
-    Write-Host 'PASS: native PowerShell/CMD, paths with spaces, updates, checksum and download failures'
+    $badChecksum = $false
+    $downloadFailure = $false
+    # Exercise Windows' running-executable lock, as encountered by jio update.
+    Remove-Item -LiteralPath $installed
+    Add-Type -TypeDefinition 'public class HoldJio { public static void Main() { System.Threading.Thread.Sleep(60000); } }' -OutputAssembly $installed -OutputType ConsoleApplication
+    $running = Start-Process -FilePath $installed -NoNewWindow -PassThru
+    try {
+        & $installer
+        if ($running.HasExited) { throw 'Updater terminated the running executable' }
+        if ((& $installed --version) -ne 'jio 0.3.1') { throw 'Running executable was not updated' }
+    } finally {
+        Stop-Process -Id $running.Id -ErrorAction SilentlyContinue
+        $running.WaitForExit()
+    }
+    & $installer # Can clean up the previous running binary on the next update.
+    Write-Host 'PASS: native PowerShell/CMD, paths with spaces, running-executable updates, checksum and download failures'
 } finally {
     $env:JIO_INSTALL_DIR = $originalDirectory
     $env:Path = $originalPath

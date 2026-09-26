@@ -65,11 +65,25 @@ function Install-Jio {
         $notices = Join-Path $directory '..\share\jio'
         [IO.Directory]::CreateDirectory($notices) | Out-Null
         Copy-Item -LiteralPath "$temporary\LICENSE", "$temporary\THIRDPARTY.json" -Destination $notices -Force
-        # Stage on the destination volume. A running/locked binary fails safely.
+        # Windows can rename a running executable but cannot overwrite it.
+        # Keep one previous binary; the next install removes it after it has exited.
         $staged = Join-Path $directory ('.jio-' + [Guid]::NewGuid().ToString('N') + '.exe')
         [IO.File]::Copy("$temporary\jio.exe", $staged, $false)
-        if ([IO.File]::Exists($destination)) { [IO.File]::Replace($staged, $destination, [NullString]::Value) }
-        else { [IO.File]::Move($staged, $destination) }
+        $previous = Join-Path $directory '.jio-previous.exe'
+        if (Test-Path -LiteralPath $previous) {
+            $item = Get-Item -LiteralPath $previous -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.PSIsContainer) {
+                throw "Refusing non-file backup: $previous"
+            }
+            [IO.File]::Delete($previous)
+        }
+        $hadPrevious = [IO.File]::Exists($destination)
+        if ($hadPrevious) { [IO.File]::Move($destination, $previous) }
+        try { [IO.File]::Move($staged, $destination) }
+        catch {
+            if ($hadPrevious) { [IO.File]::Move($previous, $destination) }
+            throw
+        }
         $staged = $null
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
         if ($directory -notin ($userPath -split ';')) {

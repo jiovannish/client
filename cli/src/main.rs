@@ -3,6 +3,7 @@ mod config;
 mod ingress;
 mod runner;
 mod session;
+mod update;
 
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -35,6 +36,7 @@ const USAGE: &str = concat!(
     "  login     codex [session-id] [options]           Use local Codex login in a VM\n",
     "  yolo      <agent> [session-id] [options]         Open an agent with full VM access\n",
     "  completion <shell>                               Print shell completion setup\n",
+    "  update                                           Install the latest CLI release\n",
     "  --version                                        Print the installed version",
 );
 
@@ -76,6 +78,12 @@ const CONFIG_USAGE: &str = concat!(
     "usage: jio config\n",
     "\n",
     "Interactively choose the default VM size used by jio create.",
+);
+
+const UPDATE_USAGE: &str = concat!(
+    "usage: jio update\n\n",
+    "Install the latest CLI release in the current executable's directory.\n",
+    "Preserves API keys, VM keys and saved configuration.",
 );
 
 const LIST_USAGE: &str = concat!(
@@ -166,7 +174,7 @@ fi
 
 _jio() {
   local -a commands agents shells options
-  commands=(create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion)
+  commands=(create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion update)
   agents=(codex)
   shells=(zsh bash fish)
 
@@ -190,7 +198,7 @@ _jio() {
       fi
       options=(--help -h)
       ;;
-    config)
+    config|update)
       options=(--help -h)
       ;;
     run)
@@ -219,7 +227,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
   command="${COMP_WORDS[1]}"
 
   if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=($(compgen -W 'create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion' -- "$current"))
+    COMPREPLY=($(compgen -W 'create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion update' -- "$current"))
     return
   fi
   if [[ $COMP_CWORD -eq 2 && ( $command == login || $command == yolo ) ]]; then
@@ -232,7 +240,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
   fi
 
   case "$command" in
-    config)    COMPREPLY=($(compgen -W '--help -h' -- "$current")) ;;
+    config|update) COMPREPLY=($(compgen -W '--help -h' -- "$current")) ;;
     run)       COMPREPLY=($(compgen -W '--language --instances --concurrency --host --help -h' -- "$current")) ;;
     exec)      COMPREPLY=($(compgen -W '--timeout --host --help -h' -- "$current")) ;;
     destroy)   COMPREPLY=($(compgen -W '--yes --host --help -h' -- "$current")) ;;
@@ -244,7 +252,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
 complete -F _jio_completion jio"#;
 
 const FISH_COMPLETION: &str = r#"complete -c jio -f
-complete -c jio -n '__fish_use_subcommand' -a 'create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion'
+complete -c jio -n '__fish_use_subcommand' -a 'create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion update'
 complete -c jio -n '__fish_seen_subcommand_from login yolo; and test (count (commandline -opc)) -eq 2' -a codex
 complete -c jio -n '__fish_seen_subcommand_from completion; and test (count (commandline -opc)) -eq 2' -a 'zsh bash fish'
 complete -c jio -n '__fish_seen_subcommand_from run' -l language -l instances -l concurrency -l host
@@ -270,6 +278,7 @@ enum Invocation {
         id: Option<String>,
     },
     Config,
+    Update,
     Usage {
         host: String,
     },
@@ -353,6 +362,7 @@ fn execute(invocation: Invocation) -> io::Result<()> {
         Invocation::Create { host } => create(host),
         Invocation::Fork { host, id } => fork(host, id.as_deref()),
         Invocation::Config => config::run(),
+        Invocation::Update => update::run(),
         Invocation::Usage { host } => session::usage(host),
         Invocation::List { host } => session::list(host),
         Invocation::Connect { host, id } => session::connect(host, id.as_deref()),
@@ -549,6 +559,13 @@ fn options_from(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
             }
         }
         Some(command) if command == OsStr::new("config") => config_options(arguments),
+        Some(command) if command == OsStr::new("update") => match arguments.next() {
+            None => Ok(Invocation::Update),
+            Some(argument) if is_help(&argument) && arguments.next().is_none() => {
+                Ok(Invocation::Help(UPDATE_USAGE))
+            }
+            Some(_) => Err(usage(UPDATE_USAGE)),
+        },
         Some(command) if command == OsStr::new("connect") => connect_options(arguments),
         Some(command) if command == OsStr::new("exec") => exec_options(arguments),
         Some(command) if command == OsStr::new("stop") => {
@@ -988,8 +1005,8 @@ mod tests {
     use super::{
         ACCOUNT_USAGE, COMPLETION_USAGE, CONFIG_USAGE, CONNECT_USAGE, CREATE_USAGE,
         CompletionShell, DESTROY_USAGE, EXEC_USAGE, FORK_USAGE, Invocation, LIST_USAGE,
-        LOGIN_USAGE, RUN_USAGE, START_USAGE, STOP_USAGE, USAGE, YOLO_USAGE, options_from,
-        prompt_connect, prompt_destroy,
+        LOGIN_USAGE, RUN_USAGE, START_USAGE, STOP_USAGE, UPDATE_USAGE, USAGE, YOLO_USAGE,
+        options_from, prompt_connect, prompt_destroy,
     };
     use std::ffi::OsString;
     use std::io::Cursor;
@@ -1269,6 +1286,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_update_without_account_options() {
+        assert!(matches!(
+            options_from(["update"].into_iter().map(OsString::from)),
+            Ok(Invocation::Update)
+        ));
+        for arguments in [
+            vec!["update", "extra"],
+            vec!["update", "--host", "example.com"],
+        ] {
+            assert!(options_from(arguments.into_iter().map(OsString::from)).is_err());
+        }
+    }
+
+    #[test]
     fn bare_invocation_lists_commands_in_readable_columns() {
         let message = options_from(std::iter::empty())
             .err()
@@ -1303,6 +1334,7 @@ mod tests {
             ("usage", ACCOUNT_USAGE),
             ("list", LIST_USAGE),
             ("config", CONFIG_USAGE),
+            ("update", UPDATE_USAGE),
             ("exec", EXEC_USAGE),
             ("connect", CONNECT_USAGE),
             ("stop", STOP_USAGE),
