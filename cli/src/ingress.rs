@@ -1,12 +1,14 @@
 use jio_client::{SessionClient, VmClient};
 use std::{ffi::OsString, io};
 
-pub const USAGE: &str = "usage: jio expose <port> [session-id] [--domain hostname] [--host host]\n       jio unexpose <port> [session-id] [--host host]\n       jio ports [session-id] [--host host]\n       jio domains add <hostname> <port> [session-id] [--host host]\n       jio domains status <hostname> [--host host]\n       jio domains remove <hostname> [--host host]";
+pub const USAGE: &str = "usage: jio expose <port> [session-id] [--domain hostname] [--host host]\n       jio unexpose <port> [session-id] [--host host]\n       jio ports [session-id] [--host host]\n       jio domains add <hostname> <port> [session-id] [--host host]\n       jio domains status <hostname> [--host host]\n       jio domains remove <hostname> [--host host]\n\nexpose publishes HTTP, SSE and WebSockets only. For PostgreSQL or private TCP, use jio forward --help.";
+pub const FORWARD_USAGE: &str = "usage: jio forward <port> [session-id] [--local-port port] [--host host]\n\nForward local 127.0.0.1:<local-port> to guest 127.0.0.1:<port> over authenticated SSH.\nThe local port defaults to the guest port; the session defaults to the current VM.\nKeep this command running; Ctrl-C closes the forward. Requires a guest template\npermitting local SSH forwarding (older templates reject connections).\n\nPostgreSQL: jio forward 5432 --local-port 15432\nThen: psql -h 127.0.0.1 -p 15432 -U <database-user> -d <database>\nDatabase authentication is still required. No public URL is created.";
 pub struct Options {
     command: String,
     arguments: Vec<String>,
     host: String,
     domain: Option<String>,
+    local_port: Option<u16>,
 }
 pub fn parse(
     command: &str,
@@ -15,24 +17,35 @@ pub fn parse(
     let mut positionals = Vec::new();
     let mut host = None;
     let mut domain = None;
-    let mut arguments = arguments.map(|a| a.into_string().map_err(|_| io::Error::other(USAGE)));
+    let mut local_port = None;
+    let usage = if command == "forward" {
+        FORWARD_USAGE
+    } else {
+        USAGE
+    };
+    let mut arguments = arguments.map(|a| a.into_string().map_err(|_| io::Error::other(usage)));
     while let Some(argument) = arguments.next() {
         let argument = argument?;
         match argument.as_str() {
-            "--help" | "-h" => return Ok(super::Invocation::Help(USAGE)),
+            "--help" | "-h" => return Ok(super::Invocation::Help(usage)),
             "--host" if host.is_none() => {
-                host = Some(arguments.next().ok_or_else(|| io::Error::other(USAGE))??)
+                host = Some(arguments.next().ok_or_else(|| io::Error::other(usage))??)
             }
             "--domain" if command == "expose" && domain.is_none() => {
                 domain = Some(arguments.next().ok_or_else(|| io::Error::other(USAGE))??)
             }
-            s if s.starts_with('-') => return Err(io::Error::other(USAGE)),
+            "--local-port" if command == "forward" && local_port.is_none() => {
+                local_port = Some(port(
+                    &arguments.next().ok_or_else(|| io::Error::other(usage))??,
+                )?);
+            }
+            s if s.starts_with('-') => return Err(io::Error::other(usage)),
             _ => positionals.push(argument),
         }
     }
     let count = positionals.len();
     let valid = match command {
-        "expose" | "unexpose" => count == 1 || count == 2,
+        "expose" | "unexpose" | "forward" => count == 1 || count == 2,
         "ports" => count <= 1,
         "domains" => match positionals.first().map(String::as_str) {
             Some("add") => count == 3 || count == 4,
@@ -42,9 +55,9 @@ pub fn parse(
         _ => false,
     };
     if !valid {
-        return Err(io::Error::other(USAGE));
+        return Err(io::Error::other(usage));
     }
-    if command == "expose" || command == "unexpose" {
+    if matches!(command, "expose" | "unexpose" | "forward") {
         port(&positionals[0])?;
     } else if command == "domains" && positionals[0] == "add" {
         port(&positionals[2])?;
@@ -60,6 +73,7 @@ pub fn parse(
         arguments: positionals,
         host: jio_client::resolve_endpoint(host)?,
         domain,
+        local_port,
     }))
 }
 fn port(s: &str) -> io::Result<u16> {
@@ -75,6 +89,14 @@ pub fn run(options: Options) -> io::Result<()> {
     let api = SessionClient::new(&options.host, &api_key)?;
     let args = &options.arguments;
     match options.command.as_str() {
+        "forward" => {
+            let guest_port = port(&args[0])?;
+            let local_port = options.local_port.unwrap_or(guest_port);
+            let id =
+                crate::session::target_session_id(&options.host, args.get(1).map(String::as_str))?;
+            let vm = VmClient::new(&options.host, &api_key)?.attach(&id)?;
+            forward(&vm, local_port, guest_port)?;
+        }
         "expose" => {
             let port = port(&args[0])?;
             let id =
@@ -149,6 +171,44 @@ pub fn run(options: Options) -> io::Result<()> {
     }
     Ok(())
 }
+
+fn forward(vm: &jio_client::Vm, local_port: u16, guest_port: u16) -> io::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let _entered = runtime.enter();
+    #[cfg(unix)]
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    #[cfg(unix)]
+    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    let mut forward = vm.forward(local_port, guest_port)?;
+    eprintln!(
+        "Opening 127.0.0.1:{local_port} -> guest 127.0.0.1:{guest_port}. Ctrl-C to stop.\nSSH reports rejected or unreachable guest connections below; the database must accept TCP connections."
+    );
+    runtime.block_on(async {
+        let stopped = async {
+            #[cfg(unix)]
+            tokio::select! {
+                _ = interrupt.recv() => {},
+                _ = terminate.recv() => {},
+                _ = hangup.recv() => {},
+            }
+            #[cfg(windows)]
+            tokio::signal::ctrl_c().await?;
+            Ok::<(), io::Error>(())
+        };
+        tokio::pin!(stopped);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut stopped => return result,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => forward.check()?,
+            }
+        }
+    })
+}
 fn print_domain(domain: jio_client::ingress::DomainStatus) {
     println!("{}  {}", domain.url, domain.status);
     println!("\nType  Name  Value");
@@ -164,6 +224,51 @@ fn print_domain(domain: jio_client::ingress::DomainStatus) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn forward_validates_ports_and_keeps_public_ingress_options_separate() -> io::Result<()> {
+        for args in [
+            vec![],
+            vec!["0"],
+            vec!["65536"],
+            vec!["-1"],
+            vec!["abc"],
+            vec!["5432", "--local-port", "0"],
+            vec!["5432", "--local-port", "65536"],
+            vec!["5432", "--local-port"],
+            vec!["5432", "--domain", "db.example.org"],
+            vec!["5432", "--local-port", "5433", "--local-port", "5434"],
+            vec!["5432", "a", "b"],
+        ] {
+            assert!(parse("forward", args.into_iter().map(OsString::from)).is_err());
+        }
+        let parsed = parse(
+            "forward",
+            ["5432", "--local-port", "15432", "--host", "ubuntu@test"]
+                .into_iter()
+                .map(OsString::from),
+        )?;
+        assert!(matches!(
+            parsed,
+            super::super::Invocation::Ingress(Options {
+                local_port: Some(15432),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse("forward", ["--help"].into_iter().map(OsString::from))?,
+            super::super::Invocation::Help(FORWARD_USAGE)
+        ));
+        assert!(
+            parse(
+                "expose",
+                ["3000", "--local-port", "3001"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .is_err()
+        );
+        Ok(())
+    }
     #[test]
     fn parses_ports_and_rejects_ambiguous_arguments() {
         for value in ["0", "65536", "-1", "abc"] {

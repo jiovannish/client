@@ -22,6 +22,7 @@ const USAGE: &str = concat!(
     "  config                                           Configure Jio defaults\n",
     "  expose    <port> [session-id] [--domain hostname] Publish an HTTP app\n",
     "  unexpose  <port> [session-id]                    Unpublish an app\n",
+    "  forward   <port> [session-id] [--local-port port] Private TCP over SSH\n",
     "  ports     [session-id]                           List published ports\n",
     "  domains   add|status|remove                      Manage custom domains\n",
     "  usage     [options]                              Show account limits and reservations\n",
@@ -166,7 +167,7 @@ fi
 
 _jio() {
   local -a commands agents shells options
-  commands=(create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion)
+  commands=(create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains forward completion)
   agents=(codex)
   shells=(zsh bash fish)
 
@@ -196,6 +197,9 @@ _jio() {
     run)
       options=(--language --instances --concurrency --host --help -h)
       ;;
+    forward)
+      options=(--local-port --host --help -h)
+      ;;
     exec)
       options=(--timeout --host --help -h)
       ;;
@@ -219,7 +223,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
   command="${COMP_WORDS[1]}"
 
   if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=($(compgen -W 'create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion' -- "$current"))
+    COMPREPLY=($(compgen -W 'create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains forward completion' -- "$current"))
     return
   fi
   if [[ $COMP_CWORD -eq 2 && ( $command == login || $command == yolo ) ]]; then
@@ -235,6 +239,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
     config)    COMPREPLY=($(compgen -W '--help -h' -- "$current")) ;;
     run)       COMPREPLY=($(compgen -W '--language --instances --concurrency --host --help -h' -- "$current")) ;;
     exec)      COMPREPLY=($(compgen -W '--timeout --host --help -h' -- "$current")) ;;
+    forward)   COMPREPLY=($(compgen -W '--local-port --host --help -h' -- "$current")) ;;
     destroy)   COMPREPLY=($(compgen -W '--yes --host --help -h' -- "$current")) ;;
     usage|list|login|yolo|create|fork|connect|stop|start)
                COMPREPLY=($(compgen -W '--host --help -h' -- "$current")) ;;
@@ -244,11 +249,12 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
 complete -F _jio_completion jio"#;
 
 const FISH_COMPLETION: &str = r#"complete -c jio -f
-complete -c jio -n '__fish_use_subcommand' -a 'create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains completion'
+complete -c jio -n '__fish_use_subcommand' -a 'create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains forward completion'
 complete -c jio -n '__fish_seen_subcommand_from login yolo; and test (count (commandline -opc)) -eq 2' -a codex
 complete -c jio -n '__fish_seen_subcommand_from completion; and test (count (commandline -opc)) -eq 2' -a 'zsh bash fish'
 complete -c jio -n '__fish_seen_subcommand_from run' -l language -l instances -l concurrency -l host
 complete -c jio -n '__fish_seen_subcommand_from exec' -l timeout -l host
+complete -c jio -n '__fish_seen_subcommand_from forward' -l local-port -l host
 complete -c jio -n '__fish_seen_subcommand_from destroy' -l yes -l host
 complete -c jio -n '__fish_seen_subcommand_from usage list create fork connect stop start login yolo' -l host"#;
 
@@ -527,7 +533,7 @@ fn options_from(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
         Some(command)
             if matches!(
                 command.to_str(),
-                Some("expose" | "unexpose" | "ports" | "domains")
+                Some("expose" | "unexpose" | "ports" | "domains" | "forward")
             ) =>
         {
             ingress::parse(command.to_str().unwrap_or_default(), arguments)

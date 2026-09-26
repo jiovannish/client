@@ -25,7 +25,7 @@ mod vm;
 pub mod windows;
 
 pub use vm::{
-    CommandResult, DEFAULT_COMMAND_TIMEOUT, MAX_COMMAND_TIMEOUT, MAX_FILE_BYTES,
+    CommandResult, DEFAULT_COMMAND_TIMEOUT, MAX_COMMAND_TIMEOUT, MAX_FILE_BYTES, PortForward,
     PreparedConnection, Vm, VmClient,
 };
 

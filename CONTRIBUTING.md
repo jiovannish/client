@@ -27,6 +27,15 @@ The CLI binary is `target/release/jio`.
 Add a regression test for behavior changes; documentation changes only need
 command and link checks.
 
+Local TCP forwarding acceptance uses only disposable loopback fixtures (no Jio
+account): after the release build above, run
+`python3 scripts/test-forward.py target/release/jio`. It needs
+OpenSSH including `sshd`, `openssl`, and a PostgreSQL server installation. Set
+`JIO_TEST_PG_BIN` to its `bin` directory if `pg_config` selects client-only tools.
+It checks PostgreSQL through direct, hosted HTTPS/SSH, and SSH-alias transports,
+rejections, concurrent clients, and signal cleanup. The fixture maps the guest's
+`jio` account to the current local user; it does not boot a microVM.
+
 `cli/` contains the CLI; `crates/jio-client/` contains the shared Rust client.
 The [Node.js](bindings/node/README.md) and [Python](bindings/python/README.md)
 SDKs wrap the same client and share its local VM credentials.
