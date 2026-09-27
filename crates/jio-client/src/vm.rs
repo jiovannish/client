@@ -304,6 +304,52 @@ impl VmClient {
         result.map_err(|error| self.retain_failed_creation("fork", &id, &temporary, error))
     }
 
+    /// Claims/creates a VM and runs its first bounded command in one HTTP request.
+    /// Local credentials are retained on an uncertain result. No automatic retry.
+    pub fn create_and_exec(
+        &self,
+        size: VmSize,
+        command: &str,
+        timeout: Duration,
+    ) -> io::Result<(Vm, CommandResult)> {
+        let id = random_session_id()?;
+        let temporary = temporary_directory(&self.sessions)?;
+        let result = (|| {
+            let key = generate_client_authority(&temporary)?;
+            persist_requested_size(&temporary, Some(size))?;
+            let (session, output) = self
+                .api
+                .create_and_exec(&id, &key, size, command, timeout)?;
+            write_known_hosts(
+                &temporary.join(KNOWN_HOSTS),
+                &id,
+                &session.ssh_host_public_key,
+            )?;
+            fs::remove_file(temporary.join(PUBLIC_KEY))?;
+            fs::rename(&temporary, self.session_directory(&id)?)?;
+            crate::sync_directory(&self.sessions)?;
+            Ok((
+                Vm {
+                    owner: self.clone(),
+                    session: Arc::new(RwLock::new(session)),
+                    transport: Arc::new(Mutex::new(None)),
+                },
+                output,
+            ))
+        })();
+        result.map_err(|e| self.retain_failed_creation("create-exec", &id, &temporary, e))
+    }
+
+    /// Runs a hosted command without attaching an SSH connection or fetching metadata.
+    pub fn exec_direct(
+        &self,
+        id: &str,
+        command: &str,
+        timeout: Duration,
+    ) -> io::Result<CommandResult> {
+        self.api.exec_direct(id, None, command, timeout)
+    }
+
     /// Starts creating a VM and returns once Core owns the in-progress session.
     ///
     /// The local SSH authority is retained immediately so a later `attach` can
@@ -926,6 +972,17 @@ impl Vm {
         let session = self.owner.inspect(&self.id())?;
         self.cache(session.clone());
         Ok(session)
+    }
+
+    /// Runs a bounded command in one API request, pinned to this handle's generation.
+    pub fn exec_direct(&self, command: &str, timeout: Duration) -> io::Result<CommandResult> {
+        let session = self.cached_session();
+        self.owner.api.exec_direct(
+            &session.session_id,
+            Some(session.generation),
+            command,
+            timeout,
+        )
     }
 
     /// Runs one command through the guest's login shell.
@@ -1615,7 +1672,7 @@ fn exit_code(status: ExitStatus) -> i32 {
     status.code().unwrap_or(-1)
 }
 
-fn random_session_id() -> io::Result<String> {
+pub(crate) fn random_session_id() -> io::Result<String> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(io::Error::other)?;
@@ -2066,6 +2123,119 @@ mod tests {
             require_private_file(&root.join(super::PRIVATE_KEY))
         })();
         result.and(remove_session_files(&root))
+    }
+
+    #[test]
+    fn direct_exec_uses_one_post_and_preserves_authority_after_lost_create() -> io::Result<()> {
+        use std::io::{BufRead, Read, Write};
+        for create in [false, true] {
+            for lost in [false, true] {
+                let root =
+                    std::env::temp_dir().join(format!("jio-direct-exec-{}", random_session_id()?));
+                let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+                let client = VmClient::with_state_directory(
+                    format!("http://{}", listener.local_addr()?),
+                    API_KEY,
+                    &root,
+                )?;
+                let server = std::thread::spawn(move || -> io::Result<String> {
+                    let (socket, _) = listener.accept()?;
+                    socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+                    let mut reader = io::BufReader::new(socket);
+                    let mut headers = String::new();
+                    let mut length = 0;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line)? == 0 || line == "\r\n" {
+                            break;
+                        }
+                        if let Some(value) =
+                            line.to_ascii_lowercase().strip_prefix("content-length:")
+                        {
+                            length = value.trim().parse::<usize>().map_err(io::Error::other)?;
+                        }
+                        headers.push_str(&line);
+                        assert!(headers.len() < 8192 && length < 32768);
+                    }
+                    let path = if create {
+                        "/v0/sessions/exec".into()
+                    } else {
+                        format!("/v0/sessions/{}/exec", "ab".repeat(16))
+                    };
+                    assert!(headers.starts_with(&format!("POST {path} ")));
+                    assert!(
+                        headers
+                            .to_ascii_lowercase()
+                            .contains(&format!("authorization: bearer {API_KEY}"))
+                    );
+                    let mut body = vec![0; length];
+                    reader.read_exact(&mut body)?;
+                    let body: serde_json::Value = serde_json::from_slice(&body)?;
+                    let request = if create { &body["exec"] } else { &body };
+                    assert_eq!(request["command"], "printf hello");
+                    let mut session = ready_session();
+                    session.size = Some(VmSize::Medium);
+                    session.ssh_host_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f".into();
+                    if create {
+                        session.session_id = body["session_id"]
+                            .as_str()
+                            .ok_or_else(|| io::Error::other("missing session"))?
+                            .into();
+                        assert!(
+                            body["client_public_key"]
+                                .as_str()
+                                .is_some_and(|s| s.starts_with("ssh-ed25519 "))
+                        );
+                    }
+                    if !lost {
+                        let output = serde_json::json!({"request_id":request["request_id"], "stdout":b"hello".to_vec(),
+                            "stderr":b"error".to_vec(),"exit_code":7,"signal":null,"timed_out":false,"output_limit":false});
+                        let response = if create {
+                            serde_json::json!({"session":session,"output":output})
+                        } else {
+                            output
+                        };
+                        let response = serde_json::to_string(&response)?;
+                        write!(
+                            reader.get_mut(),
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                            response.len()
+                        )?;
+                    }
+                    drop(reader);
+                    listener.set_nonblocking(true)?;
+                    std::thread::sleep(Duration::from_millis(150));
+                    assert!(
+                        matches!(listener.accept(), Err(e) if e.kind() == io::ErrorKind::WouldBlock),
+                        "command must not be retried"
+                    );
+                    Ok(session.session_id)
+                });
+                let result = if create {
+                    client
+                        .create_and_exec(VmSize::Medium, "printf hello", Duration::from_secs(1))
+                        .map(|(_, output)| output)
+                } else {
+                    client.exec_direct(&"ab".repeat(16), "printf hello", Duration::from_secs(1))
+                };
+                let id = server
+                    .join()
+                    .map_err(|_| io::Error::other("exec test server failed"))??;
+                if lost {
+                    assert!(result.is_err());
+                } else {
+                    let result = result?;
+                    assert_eq!(result.stdout, b"hello");
+                    assert_eq!(result.stderr, b"error");
+                    assert_eq!(result.exit_code, 7);
+                }
+                if create {
+                    require_private_file(&client.session_directory(&id)?.join(super::PRIVATE_KEY))?;
+                }
+                std::fs::remove_dir_all(root)?;
+            }
+        }
+        Ok(())
     }
 
     #[test]

@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 mod list;
 pub use list::VmSummary;
 
+mod exec;
 mod vm;
 
 #[cfg(windows)]

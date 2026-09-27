@@ -56,6 +56,7 @@ const RUN_USAGE: &str = concat!(
 const CREATE_USAGE: &str = concat!(
     "usage: jio create [options]\n",
     "\n",
+    "  --exec <command>           Create and execute in one request (30s, 64 KiB output)\n",
     "  --host <host>              Override JIO_ENDPOINT or JIO_HOST",
 );
 
@@ -90,7 +91,7 @@ const EXEC_USAGE: &str = concat!(
     "\n",
     "  <session-id>               VM session ID\n",
     "  <command>                  Quoted shell command to run\n",
-    "  --timeout <seconds>        Command timeout\n",
+    "  --timeout <seconds>        Command timeout (default: 30; above 30 uses SSH)\n",
     "  --host <host>              Override JIO_ENDPOINT or JIO_HOST",
 );
 
@@ -206,7 +207,10 @@ _jio() {
     destroy)
       options=(--yes --host --help -h)
       ;;
-    usage|list|create|fork|connect|stop|start)
+    create)
+      options=(--exec --host --help -h)
+      ;;
+    usage|list|fork|connect|stop|start)
       options=(--host --help -h)
       ;;
   esac
@@ -241,7 +245,8 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
     exec)      COMPREPLY=($(compgen -W '--timeout --host --help -h' -- "$current")) ;;
     forward)   COMPREPLY=($(compgen -W '--local-port --host --help -h' -- "$current")) ;;
     destroy)   COMPREPLY=($(compgen -W '--yes --host --help -h' -- "$current")) ;;
-    usage|list|login|yolo|create|fork|connect|stop|start)
+    create)    COMPREPLY=($(compgen -W '--exec --host --help -h' -- "$current")) ;;
+    usage|list|login|yolo|fork|connect|stop|start)
                COMPREPLY=($(compgen -W '--host --help -h' -- "$current")) ;;
   esac
 }
@@ -254,6 +259,7 @@ complete -c jio -n '__fish_seen_subcommand_from login yolo; and test (count (com
 complete -c jio -n '__fish_seen_subcommand_from completion; and test (count (commandline -opc)) -eq 2' -a 'zsh bash fish'
 complete -c jio -n '__fish_seen_subcommand_from run' -l language -l instances -l concurrency -l host
 complete -c jio -n '__fish_seen_subcommand_from exec' -l timeout -l host
+complete -c jio -n '__fish_seen_subcommand_from create' -l exec -l host
 complete -c jio -n '__fish_seen_subcommand_from forward' -l local-port -l host
 complete -c jio -n '__fish_seen_subcommand_from destroy' -l yes -l host
 complete -c jio -n '__fish_seen_subcommand_from usage list create fork connect stop start login yolo' -l host"#;
@@ -270,6 +276,10 @@ enum Invocation {
     },
     Create {
         host: String,
+    },
+    CreateExec {
+        host: String,
+        command: String,
     },
     Fork {
         host: String,
@@ -357,6 +367,20 @@ fn execute(invocation: Invocation) -> io::Result<()> {
             app::run(source, host, instances, concurrency)
         }
         Invocation::Create { host } => create(host),
+        Invocation::CreateExec { host, command } => {
+            let (session, output) = session::create_and_exec(host, config::load()?.size, &command)?;
+            eprintln!("VM: {}", session.session_id);
+            io::stdout().write_all(&output.stdout)?;
+            io::stderr().write_all(&output.stderr)?;
+            if output.success() {
+                Ok(())
+            } else {
+                Err(io::Error::other(format!(
+                    "guest command exited with status {}",
+                    output.exit_code
+                )))
+            }
+        }
         Invocation::Fork { host, id } => fork(host, id.as_deref()),
         Invocation::Config => config::run(),
         Invocation::Usage { host } => session::usage(host),
@@ -411,6 +435,28 @@ fn execute(invocation: Invocation) -> io::Result<()> {
             Ok(())
         }
     }
+}
+
+fn create_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invocation> {
+    let mut host = None;
+    let mut command = None;
+    while let Some(argument) = arguments.next() {
+        if is_help(&argument) {
+            return Ok(Invocation::Help(CREATE_USAGE));
+        }
+        if argument == "--host" && host.is_none() {
+            host = Some(arguments.next().ok_or_else(|| usage(CREATE_USAGE))?);
+        } else if argument == "--exec" && command.is_none() {
+            command = Some(text(arguments.next(), "command", CREATE_USAGE)?);
+        } else {
+            return Err(usage(CREATE_USAGE));
+        }
+    }
+    let host = session::host(host)?;
+    Ok(match command {
+        Some(command) => Invocation::CreateExec { host, command },
+        None => Invocation::Create { host },
+    })
 }
 
 fn create(host: String) -> io::Result<()> {
@@ -539,9 +585,7 @@ fn options_from(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
             ingress::parse(command.to_str().unwrap_or_default(), arguments)
         }
         Some(command) if command == OsStr::new("run") => run_options(arguments),
-        Some(command) if command == OsStr::new("create") => {
-            host_options(arguments, CREATE_USAGE, |host| Invocation::Create { host })
-        }
+        Some(command) if command == OsStr::new("create") => create_options(arguments),
         Some(command) if command == OsStr::new("usage") => {
             host_options(arguments, ACCOUNT_USAGE, |host| Invocation::Usage { host })
         }
@@ -789,7 +833,7 @@ fn exec_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
     }
 
     let mut host = None;
-    let mut timeout = jio_client::DEFAULT_COMMAND_TIMEOUT;
+    let mut timeout = Duration::from_secs(30);
     let mut timeout_set = false;
     while let Some(argument) = arguments.next() {
         if argument == "--host" && host.is_none() {
@@ -1010,6 +1054,16 @@ mod tests {
         ]
         .into_iter()
         .map(OsString::from)
+    }
+
+    #[test]
+    fn parses_single_request_create_and_rejects_missing_command() -> std::io::Result<()> {
+        assert!(
+            matches!(options_from(["create","--exec","printf hello"].into_iter().map(OsString::from))?,
+            Invocation::CreateExec { command, .. } if command == "printf hello")
+        );
+        assert!(options_from(["create", "--exec"].into_iter().map(OsString::from)).is_err());
+        Ok(())
     }
 
     #[test]

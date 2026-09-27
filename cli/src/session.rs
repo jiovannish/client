@@ -120,6 +120,18 @@ pub fn create(host: String, size: VmSize) -> io::Result<Session> {
     Ok(session)
 }
 
+pub fn create_and_exec(
+    host: String,
+    size: VmSize,
+    command: &str,
+) -> io::Result<(Session, CommandResult)> {
+    let client = client(host)?;
+    let (vm, output) = client.create_and_exec(size, command, Duration::from_secs(30))?;
+    let session = vm.session();
+    client.set_current_session_id(&session.session_id)?;
+    Ok((session, output))
+}
+
 pub fn fork(host: String, id: Option<&str>, report: impl FnOnce(&str)) -> io::Result<Session> {
     let client = client(host)?;
     let source = resolve_session_id(&client, id)?;
@@ -151,7 +163,15 @@ pub fn connect(host: String, id: Option<&str>) -> io::Result<()> {
 }
 
 pub fn exec(host: String, id: &str, command: &str, timeout: Duration) -> io::Result<CommandResult> {
-    client(host)?.attach(id)?.exec(command, timeout)
+    let client = client(host)?;
+    if timeout <= Duration::from_secs(30) && command.len() <= 4096 {
+        match client.exec_direct(id, command, timeout) {
+            Ok(output) => return Ok(output),
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {}
+            Err(error) => return Err(error), // An uncertain command is never replayed.
+        }
+    }
+    client.attach(id)?.exec(command, timeout)
 }
 
 pub fn codex_login(host: String, id: Option<&str>) -> io::Result<(String, CommandResult)> {
