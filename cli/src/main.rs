@@ -23,7 +23,7 @@ const USAGE: &str = concat!(
     "  expose    <port> [session-id] [--domain hostname] Publish an HTTP app\n",
     "  unexpose  <port> [session-id]                    Unpublish an app\n",
     "  forward   <port> [session-id] [--local-port port] Private TCP over SSH\n",
-    "  ports     [session-id]                           List published ports\n",
+    "  ports     [session-id]                           List public HTTP exposures\n",
     "  domains   add|status|remove                      Manage custom domains\n",
     "  usage     [options]                              Show account limits and reservations\n",
     "  list      [options]                              List VM IDs and sizes\n",

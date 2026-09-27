@@ -39,7 +39,18 @@ pub fn parse(
                     &arguments.next().ok_or_else(|| io::Error::other(usage))??,
                 )?);
             }
-            s if s.starts_with('-') => return Err(io::Error::other(usage)),
+            s if command == "expose" && (s == "--local-port" || s.starts_with("--local-port=")) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "--local-port is only supported by jio forward.\nUse: jio forward <port> [session-id] --local-port <local-port>\njio expose creates a public HTTP URL; it does not bind a local port.",
+                ));
+            }
+            s if s.starts_with('-') => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unexpected option '{s}' for jio {command}\n{usage}"),
+                ));
+            }
             _ => positionals.push(argument),
         }
     }
@@ -107,6 +118,20 @@ pub fn run(options: Options) -> io::Result<()> {
             } else {
                 api.expose(&id, port)?
             };
+            if exposure.status == "published" && exposure.credential.is_none() {
+                if options.domain.is_none() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!(
+                            "port {port} is already exposed publicly over HTTP: {}\nUse jio forward {port} {id} --local-port <local-port> for private TCP access, or jio unexpose {port} {id} to remove the public URL.",
+                            exposure.url
+                        ),
+                    ));
+                }
+                eprintln!(
+                    "Port {port} is already exposed publicly over HTTP; adding the domain alias."
+                );
+            }
             if exposure.credential.is_some() {
                 jio_client::ingress::install_helper(
                     &vm,
@@ -130,6 +155,9 @@ pub fn run(options: Options) -> io::Result<()> {
                     "helper has not connected; inspect with jio ports and retry jio expose after 35 seconds",
                 ));
             }
+            eprintln!(
+                "Public HTTP exposure for guest port {port}. For private TCP access, use jio forward."
+            );
             println!("{}", exposure.url);
             if let Some(name) = options.domain {
                 print_domain(api.add_domain(&name, &id, port)?);
@@ -139,18 +167,26 @@ pub fn run(options: Options) -> io::Result<()> {
             let id =
                 crate::session::target_session_id(&options.host, args.get(1).map(String::as_str))?;
             api.unexpose(&id, port(&args[0])?)?;
-            println!("Port {} unpublished.", args[0]);
+            println!(
+                "Public HTTP exposure for port {} removed. Local SSH forwards are unaffected.",
+                args[0]
+            );
         }
         "ports" => {
             let id =
                 crate::session::target_session_id(&options.host, args.first().map(String::as_str))?;
             let ports = api.ports(&id)?;
             if ports.is_empty() {
-                println!("No exposed ports.");
+                println!("No public HTTP exposures.");
+            } else {
+                println!("PORT\tTYPE\tSTATUS\tURL");
             }
             for p in ports {
-                println!("{}\t{}\t{}", p.port, p.status, p.url);
+                println!("{}\tpublic-http\t{}\t{}", p.port, p.status, p.url);
             }
+            eprintln!(
+                "Local SSH forwards (jio forward) are not listed here; they run in their own terminal."
+            );
         }
         "domains" => match args[0].as_str() {
             "add" => {
@@ -185,7 +221,7 @@ fn forward(vm: &jio_client::Vm, local_port: u16, guest_port: u16) -> io::Result<
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     let mut forward = vm.forward(local_port, guest_port)?;
     eprintln!(
-        "Opening 127.0.0.1:{local_port} -> guest 127.0.0.1:{guest_port}. Ctrl-C to stop.\nSSH reports rejected or unreachable guest connections below; the database must accept TCP connections."
+        "Opening private TCP forward: 127.0.0.1:{local_port} -> guest 127.0.0.1:{guest_port}. Ctrl-C to stop.\nThis does not create or remove a public HTTP exposure; jio ports lists those separately.\nSSH reports rejected or unreachable guest connections below; the service must accept TCP connections."
     );
     runtime.block_on(async {
         let stopped = async {

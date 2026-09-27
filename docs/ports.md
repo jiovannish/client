@@ -17,6 +17,14 @@ Each command accepts an optional session ID and `--host` endpoint override.
 Apps may listen on `127.0.0.1` or `::1`. HTTP, SSE and WebSockets are supported.
 `expose` does not carry PostgreSQL or other native TCP protocols. A PostgreSQL
 client cannot connect to an `https://…apps.jiovanni.sh` URL, even on port 443.
+`--local-port` belongs to `jio forward`, not `jio expose`. Repeating `expose` on
+an already published port reports an error with its existing URL; adding a
+`--domain` alias still works. Disconnected publications can be retried.
+`jio ports` labels these entries `public-http`; `published` means the HTTP tunnel
+is connected, not that the application is healthy or speaks HTTP. Local SSH
+forwards are not listed. A public exposure and a private forward can use the same
+guest port independently: `forward` does not remove an existing public URL,
+and `unexpose` does not stop a local forward.
 Closing your local terminal leaves the app published. On systemd templates,
 the CLI installs `jio-ingress-<port>.service`, which reconnects after a
 clean VM restart using a renewable credential scoped to that VM and port.
@@ -50,9 +58,9 @@ Use your database client's password prompt or private credential store.
 
 This requires a guest template permitting local SSH forwarding. Older templates
 set `AllowTcpForwarding no` and reject connections with `administratively prohibited`;
-updating the CLI alone cannot change their policy. Client v0.4.0 adds this command, but does not deploy updated templates. A compatible
-guest must allow `local` TCP forwarding with `PermitOpen 127.0.0.1:*`; this command
-does not edit the guest configuration.
+updating the CLI alone cannot change their policy. This source change has not
+been deployed. A future rebuilt template must allow `local` TCP forwarding with
+`PermitOpen 127.0.0.1:*`; this command does not edit the guest configuration.
 
 Keep `jio forward` running. Ctrl-C closes its listener and SSH transport; it leaves
 the VM and database running. No public URL or persistent publication is created.

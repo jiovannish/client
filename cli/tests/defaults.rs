@@ -291,7 +291,11 @@ fn login_persists_verified_credentials_and_fails_closed() -> io::Result<()> {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.stdout, b"No exposed ports.\n");
+    assert_eq!(output.stdout, b"No public HTTP exposures.\n");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Local SSH forwards (jio forward) are not listed here")
+    );
     for invalid in [
         "short".to_owned(),
         "x".repeat(257),
