@@ -1990,7 +1990,6 @@ mod tests {
     use std::process::Command;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    #[cfg(unix)]
     use std::time::Duration;
 
     const API_KEY: &str = "0123456789abcdef0123456789abcdef";
