@@ -176,6 +176,28 @@ jio start <session-id>
 
 Hosted ephemeral sessions do not support stop/start; use `destroy` to clean up.
 
+## Single-request commands (development)
+
+A matching Server, Core and guest build supports bounded commands over the existing
+API connection. Create a VM and run its first command with one HTTP request:
+
+```sh
+jio create --exec 'printf hello'
+jio exec <session-id> 'uname -a'
+```
+
+`create --exec` uses the configured VM size and prints its ID to stderr. Commands
+run as `jio` in `/home/jio`, with no stdin, at most 30 seconds and 64 KiB combined
+stdout/stderr. `jio exec --timeout 120` uses SSH for longer commands. An explicit
+unsupported-capability response also selects SSH; uncertain commands are never
+retried. This development path requires the new Server endpoints before installing
+the client; existing production releases may not provide them.
+
+The account API key authorizes these bounded commands. SSH connections still need
+the local VM key. The Rust SDK exposes `VmClient::create_and_exec`,
+`VmClient::exec_direct` and `Vm::exec_direct`; existing SDK `exec` methods keep their
+SSH behavior. Node.js and Python bindings currently retain SSH execution.
+
 ## Configuration
 
 ```sh
