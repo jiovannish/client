@@ -232,4 +232,5 @@ Run `jio --help` or `jio <command> --help`. Use `jio completion zsh`,
 
 See [limitations](limitations.md) and [contributing](../CONTRIBUTING.md) for more detail.
 
-See [publishing apps and custom domains](ports.md) for `jio expose`, `jio ports` and `jio domains`.
+See [publishing apps and custom domains](ports.md) for `jio expose`, `jio ports` and `jio domains`,
+or [private PostgreSQL and TCP access](ports.md#private-postgresql-and-tcp-access) for `jio forward`.

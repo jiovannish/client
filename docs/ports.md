@@ -15,6 +15,16 @@ jio unexpose 3000
 
 Each command accepts an optional session ID and `--host` endpoint override.
 Apps may listen on `127.0.0.1` or `::1`. HTTP, SSE and WebSockets are supported.
+`expose` does not carry PostgreSQL or other native TCP protocols. A PostgreSQL
+client cannot connect to an `https://…apps.jiovanni.sh` URL, even on port 443.
+`--local-port` belongs to `jio forward`, not `jio expose`. Repeating `expose` on
+an already published port reports an error with its existing URL; adding a
+`--domain` alias still works. Disconnected publications can be retried.
+`jio ports` labels these entries `public-http`; `published` means the HTTP tunnel
+is connected, not that the application is healthy or speaks HTTP. Local SSH
+forwards are not listed. A public exposure and a private forward can use the same
+guest port independently: `forward` does not remove an existing public URL,
+and `unexpose` does not stop a local forward.
 Closing your local terminal leaves the app published. On systemd templates,
 the CLI installs `jio-ingress-<port>.service`, which reconnects after a
 clean VM restart using a renewable credential scoped to that VM and port.
@@ -27,6 +37,39 @@ Older snapshots may leave loopback down. `jio expose` brings it up
 when installing the helper. If you start the app first, run
 `sudo ip link set dev lo up` inside the VM before binding to localhost. Future
 templates should initialize loopback before declaring the session ready.
+
+## Private PostgreSQL and TCP access
+
+Use an authenticated SSH forward from your local terminal:
+
+```sh
+jio forward 5432 --local-port 15432
+# In another terminal:
+psql -h 127.0.0.1 -p 15432 -U <database-user> -d <database>
+```
+
+Both the local listener and guest destination use `127.0.0.1`. The local port
+defaults to the guest port; `--local-port` avoids conflicts with a local database.
+Pass a session ID after the guest port to select another VM, or use `--host` to
+select its endpoint. The API key, local VM private key and pinned guest host key
+are required, just as for `jio connect`. PostgreSQL must listen on guest IPv4
+loopback and allow the database user through its own authentication settings.
+Use your database client's password prompt or private credential store.
+
+This requires a guest template permitting local SSH forwarding. Older templates
+set `AllowTcpForwarding no` and reject connections with `administratively prohibited`;
+updating the CLI alone cannot change their policy. This source change has not
+been deployed. A future rebuilt template must allow `local` TCP forwarding with
+`PermitOpen 127.0.0.1:*`; this command does not edit the guest configuration.
+
+Keep `jio forward` running. Ctrl-C closes its listener and SSH transport; it leaves
+the VM and database running. No public URL or persistent publication is created.
+Starting a listener does not prove that PostgreSQL is reachable: SSH prints policy
+and connection-refused errors as local clients connect. Other local users can use
+the listener, so keep database authentication enabled. IPv6-only databases, UDP
+and automatic reconnection are unsupported. Hosted gateway expiry, revocation or
+VM restart ends the transport; reconnect explicitly (the current gateway also
+has a one-hour stream limit).
 
 ## Custom domains
 
@@ -55,7 +98,7 @@ checksum, caches the binary privately and transfers it over existing authenticat
 SSH. The CLI stages helpers in `/var/tmp` to avoid the small `/tmp`
 filesystem in older Ubuntu templates. Only a port-specific capability enters the VM; your account API
 key stays local. Four ports per VM and sixteen simultaneous connections per port
-are supported, subject to worker capacity. Raw TCP/UDP and wildcard custom domains
-are not supported.
+are supported, subject to worker capacity. Public raw TCP/UDP and wildcard custom
+domains are not supported; `jio forward` supplies private local TCP access only.
 
 Local development can select a matching Linux binary with `JIO_INGRESS_BINARY=/absolute/path/to/jio jio expose 3000`.

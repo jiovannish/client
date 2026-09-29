@@ -584,7 +584,7 @@ impl VmClient {
         credentials: &Credentials,
         tty_mode: TtyMode,
     ) -> io::Result<Command> {
-        self.ssh_command_at(session, credentials, tty_mode, None)
+        self.ssh_command_at(session, credentials, tty_mode, None, None)
     }
 
     fn ssh_command_at(
@@ -593,7 +593,11 @@ impl VmClient {
         credentials: &Credentials,
         tty_mode: TtyMode,
         transport: Option<(&Path, u16, bool)>,
+        forward: Option<(u16, u16)>,
     ) -> io::Result<Command> {
+        if forward.is_some_and(|(local, remote)| local == 0 || remote == 0) {
+            return Err(invalid_input("port must be between 1 and 65535"));
+        }
         if transport.is_none()
             && self.api.uses_http_endpoint()
             && !self.api.uses_local_http_endpoint()
@@ -624,6 +628,11 @@ impl VmClient {
             credentials.known_hosts.to_string_lossy().replace('\\', "/")
         );
         let mut command = Command::new(crate::ssh_program("ssh"));
+        // Forwarding must not inherit additional listeners from the user's config.
+        #[cfg(unix)]
+        if forward.is_some() && transport.is_none() {
+            command.args(["-F", "/dev/null"]);
+        }
         #[cfg(unix)]
         if let Some((socket, _, master)) = transport {
             command
@@ -689,7 +698,11 @@ impl VmClient {
             .arg("-o")
             .arg("ForwardAgent=no")
             .arg("-o")
-            .arg("ClearAllForwardings=yes")
+            .arg(if forward.is_some() {
+                "ClearAllForwardings=no"
+            } else {
+                "ClearAllForwardings=yes"
+            })
             .arg("-o")
             .arg("PermitLocalCommand=no")
             .arg("-o")
@@ -710,7 +723,39 @@ impl VmClient {
             }
         }
         if transport.is_none() && !self.api.uses_local_http_endpoint() {
-            command.arg("-J").arg(self.api.endpoint());
+            if forward.is_some() {
+                // -J propagates our -F /dev/null to its child, losing jump-host
+                // aliases and credentials. Only the jump subprocess reads user
+                // config; -W/ClearAllForwardings prevent its extra listeners.
+                let program = crate::ssh_program("ssh");
+                #[cfg(unix)]
+                let program = shell_quote(
+                    program
+                        .to_str()
+                        .ok_or_else(|| invalid_input("SSH path is not UTF-8"))?,
+                );
+                #[cfg(windows)]
+                let program = format!("\"{}\"", program.to_string_lossy().replace('\\', "/"));
+                command.arg("-o").arg(format!(
+                    "ProxyCommand={program} -o BatchMode=yes -o ClearAllForwardings=yes -o ForwardAgent=no -W %h:%p \"{}\"",
+                    self.api.endpoint()
+                ));
+            } else {
+                command.arg("-J").arg(self.api.endpoint());
+            }
+        }
+        if let Some((local, remote)) = forward {
+            command.args([
+                "-N",
+                "-L",
+                &format!("127.0.0.1:{local}:127.0.0.1:{remote}"),
+                "-o",
+                "ExitOnForwardFailure=yes",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=3",
+            ]);
         }
         command.arg(target);
         Ok(command)
@@ -798,6 +843,7 @@ impl Vm {
                 &self.owner,
                 &session,
                 &credentials,
+                None,
             )?);
             self.cache(session);
         }
@@ -812,7 +858,57 @@ impl Vm {
             &credentials,
             tty,
             Some((&gateway.socket, gateway.port, false)),
+            None,
         )
+    }
+
+    /// Opens a private TCP forward through authenticated SSH, with both ends on
+    /// `127.0.0.1`. Drop the handle to close it; call [`PortForward::check`] to
+    /// detect transport failure. Ports must be nonzero.
+    ///
+    /// Requires a guest template permitting local SSH forwarding. Starting the
+    /// listener does not prove the guest service is reachable: SSH reports channel
+    /// rejection/refusal on stderr when a local client connects. No reconnect is
+    /// attempted, and an existing `Vm` command transport is never reused or closed.
+    pub fn forward(&self, local_port: u16, guest_port: u16) -> io::Result<PortForward> {
+        if local_port == 0 || guest_port == 0 {
+            return Err(invalid_input("port must be between 1 and 65535"));
+        }
+        let (session, credentials) = self.owner.ready_session(&self.id())?;
+        let ports = Some((local_port, guest_port));
+        let gateway =
+            if self.owner.api.uses_http_endpoint() && !self.owner.api.uses_local_http_endpoint() {
+                Some(transport::Gateway::open(
+                    &self.owner,
+                    &session,
+                    &credentials,
+                    ports,
+                )?)
+            } else {
+                None
+            };
+        // Unix hosted gateways own a dedicated SSH master and its listener.
+        // Windows has no ControlMaster and needs a foreground SSH process.
+        let process = if cfg!(unix) && gateway.is_some() {
+            None
+        } else {
+            Some(
+                self.owner
+                    .ssh_command_at(
+                        &session,
+                        &credentials,
+                        TtyMode::Disabled,
+                        gateway
+                            .as_ref()
+                            .map(|g| (g.socket.as_path(), g.port, false)),
+                        ports,
+                    )?
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .spawn()?,
+            )
+        };
+        Ok(PortForward { process, gateway })
     }
 
     fn disconnect(&self) -> io::Result<()> {
@@ -1001,6 +1097,38 @@ impl Vm {
         match self.session.write() {
             Ok(mut current) => *current = session,
             Err(poisoned) => *poisoned.into_inner() = session,
+        }
+    }
+}
+
+/// An owned local SSH forward. Dropping it closes the listener and reaps SSH.
+pub struct PortForward {
+    process: Option<Child>,
+    gateway: Option<transport::Gateway>,
+}
+
+impl PortForward {
+    /// Detects a closed SSH transport. Per-connection guest failures are reported
+    /// by OpenSSH on stderr and do not close the local listener.
+    pub fn check(&mut self) -> io::Result<()> {
+        if let Some(gateway) = &mut self.gateway {
+            gateway.check()?;
+        }
+        if let Some(child) = &mut self.process {
+            if let Some(status) = child.try_wait()? {
+                return Err(io::Error::other(format!(
+                    "SSH forward exited with {status}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PortForward {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.process {
+            terminate(child);
         }
     }
 }
@@ -2189,6 +2317,64 @@ mod tests {
             "UserKnownHostsFile=/tmp/state with spaces/known_hosts"
         };
         assert!(arguments.iter().any(|value| *value == OsStr::new(expected)));
+        Ok(())
+    }
+
+    #[test]
+    fn native_forward_keeps_pinning_and_only_enables_explicit_loopback_ports() -> io::Result<()> {
+        let client = VmClient {
+            api: SessionClient::new("http://127.0.0.1:8080", API_KEY)?,
+            sessions: PathBuf::new(),
+        };
+        let session = ready_session();
+        let credentials = Credentials {
+            private_key: PathBuf::from("/tmp/id_ed25519"),
+            known_hosts: PathBuf::from("/tmp/known_hosts"),
+        };
+        for transport in [
+            None,
+            Some((std::path::Path::new("/tmp/jio-socket"), 1234, true)),
+        ] {
+            let command = client.ssh_command_at(
+                &session,
+                &credentials,
+                TtyMode::Disabled,
+                transport,
+                Some((15432, 5432)),
+            )?;
+            let args: Vec<_> = command.get_args().collect();
+            for expected in [
+                "127.0.0.1:15432:127.0.0.1:5432",
+                "ClearAllForwardings=no",
+                "ExitOnForwardFailure=yes",
+                "StrictHostKeyChecking=yes",
+                "BatchMode=yes",
+                "ForwardAgent=no",
+                "-N",
+                "-F",
+            ] {
+                assert!(args.contains(&OsStr::new(expected)), "missing {expected}");
+            }
+            assert!(!args.contains(&OsStr::new("ClearAllForwardings=yes")));
+            assert!(
+                args.last()
+                    .is_some_and(|arg| arg.to_string_lossy().starts_with("jio@"))
+            );
+        }
+        for ports in [(0, 5432), (5432, 0)] {
+            assert!(
+                client
+                    .ssh_command_at(&session, &credentials, TtyMode::Disabled, None, Some(ports))
+                    .is_err()
+            );
+        }
+        let command = client.ssh_command(&session, &credentials, TtyMode::Disabled)?;
+        assert!(
+            command
+                .get_args()
+                .any(|arg| arg == "ClearAllForwardings=yes")
+        );
+        assert!(!command.get_args().any(|arg| arg == "-L"));
         Ok(())
     }
 

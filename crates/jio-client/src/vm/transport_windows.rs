@@ -9,7 +9,12 @@ pub(super) struct Gateway {
 }
 
 impl Gateway {
-    pub fn open(owner: &VmClient, session: &Session, _: &Credentials) -> io::Result<Self> {
+    pub fn open(
+        owner: &VmClient,
+        session: &Session,
+        _: &Credentials,
+        _: Option<(u16, u16)>,
+    ) -> io::Result<Self> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
         listener.set_nonblocking(true)?;
@@ -155,7 +160,7 @@ fn independent_connections_are_scoped_and_close_with_the_gateway() -> io::Result
         private_key: PathBuf::new(),
         known_hosts: PathBuf::new(),
     };
-    let mut gateway = Gateway::open(&owner, &session, &credentials)?;
+    let mut gateway = Gateway::open(&owner, &session, &credentials, None)?;
     gateway.check()?;
     assert!(gateway.socket.as_os_str().is_empty());
     let mut streams = Vec::new();

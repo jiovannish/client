@@ -15,6 +15,7 @@ impl Gateway {
         owner: &VmClient,
         session: &Session,
         credentials: &Credentials,
+        forward: Option<(u16, u16)>,
     ) -> io::Result<Self> {
         // Short, private directory avoids Unix socket path limits on macOS.
         let directory = temporary_directory(Path::new("/tmp"))?;
@@ -95,12 +96,17 @@ impl Gateway {
             credentials,
             TtyMode::Disabled,
             Some((&gateway.socket, gateway.port, true)),
+            forward,
         )?;
         gateway.process = Some(
             command
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(if forward.is_some() {
+                    Stdio::inherit()
+                } else {
+                    Stdio::null()
+                })
                 .spawn()?,
         );
         let deadline = Instant::now() + Duration::from_secs(10);
