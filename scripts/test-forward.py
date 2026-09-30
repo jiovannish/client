@@ -140,6 +140,8 @@ def main():
                        guest_ready_ns=10, storage_ready_ns=20, network_ready_ns=30, ssh_ready_ns=40)
         relays = []
         requests = []
+        exposure = dict(session_id=sid, port=pg_port, generation=1, status="published",
+                        url=f"https://{sid}-{pg_port}.apps.example.test", credential=None)
 
         class Handler(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -153,6 +155,8 @@ def main():
                     return self.reply(401, {"error": "unauthorized fixture key"})
                 if self.path == f"/v0/sessions/{sid}":
                     return self.reply(200, session)
+                if self.path == f"/v1/sessions/{sid}/ports":
+                    return self.reply(200, [{**exposure, "status": "published"}])
                 if self.path != f"/v0/sessions/{sid}/ssh":
                     return self.reply(404, {"error": "fixture session not found"})
                 assert self.headers["Upgrade"] == "jio-ssh"
@@ -178,6 +182,19 @@ def main():
                         for stream in streams:
                             relays.remove(stream)
                         self.close_connection = True
+
+            def do_POST(self):
+                requests.append(self.path)
+                if self.headers.get("Authorization") != "Bearer " + key:
+                    return self.reply(401, {"error": "unauthorized fixture key"})
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                if self.path == f"/v1/sessions/{sid}/ports/{pg_port}":
+                    return self.reply(200, exposure)
+                if self.path == "/v1/domains":
+                    assert json.loads(body) == dict(hostname="app.example.test", session_id=sid, port=pg_port)
+                    return self.reply(200, dict(url="https://app.example.test", hostname="app.example.test",
+                                               status="pending_dns", records=[], subdomain_cname_alternative="gateway.example.test"))
+                return self.reply(404, {"error": "fixture route not found"})
 
             def reply(self, status, value):
                 data = json.dumps(value).encode()
@@ -240,6 +257,10 @@ def main():
             for bad in ["0", "65536", "-1", "abc"]:
                 fails(command(hosted, bad))
                 fails(command(hosted, port(), guest=bad))
+            for options in [["1234", "--local-port", "12345"], ["--local-port=12345", "1234"]]:
+                fails([str(binary), "expose", *options, "--host", hosted],
+                      "--local-port is only supported by jio forward")
+            fails([str(binary), "expose", "1234", "--typo"], "unexpected option '--typo'")
             assert len(requests) == before
             assert "PostgreSQL" in run(binary, "forward", "--help", env=env)
             assert "HTTP" in run(binary, "expose", "--help", env=env)
@@ -277,6 +298,22 @@ def main():
                             wait_for(lambda: child.poll() is not None or listening(local))
                             assert child.poll() is None, (root / "forward.log").read_text()
                             assert query(local) == "42"
+                            if endpoint == direct and stop == signal.SIGINT:
+                                expose = [str(binary), "expose", str(pg_port), sid, "--host", endpoint]
+                                before_expose = len(requests)
+                                fails(expose, f"already exposed publicly over HTTP: {exposure['url']}")
+                                assert "/v1/domains" not in requests[before_expose:]
+                                assert "pending_dns" in run(*expose, "--domain", "app.example.test", env=env)
+                                # An existing helper reconnecting must not be rejected as a duplicate.
+                                exposure["status"] = "disconnected"
+                                assert run(*expose, env=env) == exposure["url"]
+                                exposure["status"] = "published"
+                                listing = subprocess.run([str(binary), "ports", sid, "--host", endpoint],
+                                                         env=env, capture_output=True, text=True, timeout=20, check=True)
+                                assert f"{pg_port}\tpublic-http\tpublished\t{exposure['url']}" in listing.stdout
+                                assert "Local SSH forwards (jio forward) are not listed here" in listing.stderr
+                                assert query(local) == "42"  # Exposure commands leave the active forward alone.
+                                print("PASS expose flag hints, duplicate error, domain alias, reconnect and HTTP labels while forwarding")
                             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
                                 assert list(pool.map(lambda _: query(local), range(4))) == ["42"] * 4
                             assert query(local, "select repeat('x', 65536)") == "x" * 65536
