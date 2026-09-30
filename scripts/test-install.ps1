@@ -36,7 +36,7 @@ try {
     & $installer
     & $installer # Updating an existing install is supported.
     $installed = "$env:JIO_INSTALL_DIR\jio.exe"
-    if ((& $installed --version) -ne 'jio 0.3.1') { throw 'Installed version mismatch' }
+    if ((& $installed --version) -ne 'jio 0.5.0') { throw 'Installed version mismatch' }
     $before = (Get-FileHash $installed).Hash
     foreach ($failure in @('checksum', 'download')) {
         $badChecksum = $failure -eq 'checksum'
@@ -48,9 +48,9 @@ try {
     }
     $env:JIO_TEST_BINARY = $installed
     $version = & powershell.exe -NoProfile -NonInteractive -Command '& $env:JIO_TEST_BINARY --version'
-    if ($LASTEXITCODE -ne 0 -or $version -ne 'jio 0.3.1') { throw 'PowerShell invocation failed' }
+    if ($LASTEXITCODE -ne 0 -or $version -ne 'jio 0.5.0') { throw 'PowerShell invocation failed' }
     $version = & cmd.exe /d /c '"%JIO_TEST_BINARY%" --version'
-    if ($LASTEXITCODE -ne 0 -or $version -ne 'jio 0.3.1') { throw 'CMD invocation failed' }
+    if ($LASTEXITCODE -ne 0 -or $version -ne 'jio 0.5.0') { throw 'CMD invocation failed' }
     $badChecksum = $false
     $downloadFailure = $false
     # Exercise Windows' running-executable lock, as encountered by jio update.
@@ -60,7 +60,7 @@ try {
     try {
         & $installer
         if ($running.HasExited) { throw 'Updater terminated the running executable' }
-        if ((& $installed --version) -ne 'jio 0.3.1') { throw 'Running executable was not updated' }
+        if ((& $installed --version) -ne 'jio 0.5.0') { throw 'Running executable was not updated' }
     } finally {
         Stop-Process -Id $running.Id -ErrorAction SilentlyContinue
         $running.WaitForExit()
