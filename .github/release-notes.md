@@ -1,16 +1,16 @@
-`jio forward` adds private TCP access to VM services such as PostgreSQL through authenticated SSH. Both the local listener and guest destination use IPv4 loopback; guest host keys remain pinned.
+`jio create --exec` creates a VM and runs its first command in one API request. Short hosted `jio exec` commands now use the guest control channel; commands requesting more than 30 seconds continue to use SSH.
 
 ```sh
-jio forward 5432 --local-port 15432
-# In another terminal:
-psql -h 127.0.0.1 -p 15432 -U <database-user> -d <database>
+jio create --exec 'printf hello'
+jio exec <session-id> 'uname -a'
+jio update
 ```
 
-Keep the forward running; Ctrl-C closes it and leaves the VM and database running. `--local-port` avoids conflicts with a local database, and an optional session ID selects another VM. `jio expose` continues to publish HTTP apps through public HTTPS URLs.
+- `jio update` installs the latest release into the current executable’s directory, verifies the archive checksum and binary version, and preserves saved credentials and VM state. The directory must be writable.
+- Public HTTP exposures and private TCP forwards have clearer errors and port listings.
+- The Rust SDK exposes direct execution and create-and-exec, with an opt-in hosted lifecycle acceptance example. Node.js and Python bindings retain SSH execution.
 
-**Template compatibility:** forwarding requires guest SSH policy that permits local TCP forwarding to `127.0.0.1`. Existing templates with `AllowTcpForwarding no` reject connections; upgrading the client alone does not update their policy. This client release does not deploy or modify VM templates. Database authentication is still required. The existing hosted gateway has a one-hour stream limit; automatic reconnection is not provided.
-
-Validated locally with real PostgreSQL through direct SSH, hosted-style HTTPS/SSH, and SSH jump-host aliases, including authentication failures, restricted destinations, occupied ports, disconnects and cleanup. These checks used local fixtures; native PostgreSQL inside a rebuilt Jio VM remains unverified.
+Direct execution requires a compatible Server, Core and guest template. It is bounded to 30 seconds and 64 KiB of combined output. An unsupported endpoint falls back to SSH for `jio exec`; unknown execution outcomes are not retried automatically. SDK binaries remain source-build only.
 
 ## Install
 
@@ -40,4 +40,4 @@ Each archive includes the CLI, Apache-2.0 license, and dependency notices. Check
 
 Published app URLs are public; use application authentication for private content. Persistent port publication requires a compatible Server and systemd guest; older templates require republishing after restart.
 
-[CLI guide](https://github.com/jiovannish/client/blob/v0.4.0/docs/README.md) · [Security](https://github.com/jiovannish/client/blob/v0.4.0/SECURITY.md) · [Code of Conduct](https://github.com/jiovannish/client/blob/v0.4.0/CODE_OF_CONDUCT.md)
+[CLI guide](https://github.com/jiovannish/client/blob/v0.5.0/docs/README.md) · [Security](https://github.com/jiovannish/client/blob/v0.5.0/SECURITY.md) · [Code of Conduct](https://github.com/jiovannish/client/blob/v0.5.0/CODE_OF_CONDUCT.md)
