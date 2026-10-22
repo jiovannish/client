@@ -74,8 +74,8 @@ pub fn api_key(host: &str) -> io::Result<String> {
                 .strip_suffix('\n')
                 .and_then(|value| value.split_once('\n'))
                 .ok_or_else(|| invalid_data("invalid saved Jio credentials"))?;
-            let client = jio_client::SessionClient::new(endpoint, key)?;
-            if client.endpoint() != host {
+            // The caller validates the key when constructing its actual API client.
+            if jio_client::resolve_endpoint(Some(endpoint.to_owned()))? != host {
                 return Err(invalid_input(
                     "saved login belongs to a different endpoint; run jio login <api-key> --host <host> or set JIO_API_KEY",
                 ));
