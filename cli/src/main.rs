@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod ingress;
+mod jobs;
 mod runner;
 mod session;
 mod update;
@@ -29,6 +30,7 @@ const USAGE: &str = concat!(
     "  usage     [options]                              Show account limits and reservations\n",
     "  list      [options]                              List VM IDs and sizes\n",
     "  exec      <session-id> <command> [options]       Run a command in a VM\n",
+    "  job       submit|status|run|cancel|bind          Manage durable command steps\n",
     "  connect   [session-id] [options]                 Open an interactive shell\n",
     "  stop      <session-id> [options]                 Stop compute and retain files\n",
     "  start     <session-id> [options]                 Start with retained files\n",
@@ -176,7 +178,7 @@ fi
 
 _jio() {
   local -a commands agents shells options
-  commands=(create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains forward completion update)
+  commands=(create fork config usage list exec job connect stop start destroy login yolo expose unexpose ports domains forward completion update)
   agents=(codex)
   shells=(zsh bash fish)
 
@@ -235,7 +237,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
   command="${COMP_WORDS[1]}"
 
   if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=($(compgen -W 'create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains forward completion update' -- "$current"))
+    COMPREPLY=($(compgen -W 'create fork config usage list exec job connect stop start destroy login yolo expose unexpose ports domains forward completion update' -- "$current"))
     return
   fi
   if [[ $COMP_CWORD -eq 2 && ( $command == login || $command == yolo ) ]]; then
@@ -262,7 +264,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
 complete -F _jio_completion jio"#;
 
 const FISH_COMPLETION: &str = r#"complete -c jio -f
-complete -c jio -n '__fish_use_subcommand' -a 'create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains forward completion update'
+complete -c jio -n '__fish_use_subcommand' -a 'create fork config usage list exec job connect stop start destroy login yolo expose unexpose ports domains forward completion update'
 complete -c jio -n '__fish_seen_subcommand_from login yolo; and test (count (commandline -opc)) -eq 2' -a codex
 complete -c jio -n '__fish_seen_subcommand_from completion; and test (count (commandline -opc)) -eq 2' -a 'zsh bash fish'
 complete -c jio -n '__fish_seen_subcommand_from run' -l language -l instances -l concurrency -l host
@@ -273,6 +275,7 @@ complete -c jio -n '__fish_seen_subcommand_from destroy' -l yes -l host
 complete -c jio -n '__fish_seen_subcommand_from usage list create fork connect stop start login yolo' -l host"#;
 
 enum Invocation {
+    Job(jobs::Options),
     Ingress(ingress::Options),
     IngressHelper,
     Help(&'static str),
@@ -360,6 +363,7 @@ fn main() -> ExitCode {
 
 fn execute(invocation: Invocation) -> io::Result<()> {
     match invocation {
+        Invocation::Job(options) => jobs::run(options),
         Invocation::Ingress(options) => ingress::run(options),
         Invocation::IngressHelper => jio_client::ingress::run_helper(),
         Invocation::Help(help) => {
@@ -595,6 +599,7 @@ fn options_from(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
             ingress::parse(command.to_str().unwrap_or_default(), arguments)
         }
         Some(command) if command == OsStr::new("run") => run_options(arguments),
+        Some(command) if command == OsStr::new("job") => jobs::parse(arguments),
         Some(command) if command == OsStr::new("create") => create_options(arguments),
         Some(command) if command == OsStr::new("usage") => {
             host_options(arguments, ACCOUNT_USAGE, |host| Invocation::Usage { host })

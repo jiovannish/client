@@ -740,6 +740,7 @@ dependencies = [
  "crossterm",
  "jio-client",
  "ratatui",
+ "serde_json",
  "tokio",
 ]
 
