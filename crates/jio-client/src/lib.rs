@@ -1,4 +1,5 @@
 pub mod ingress;
+pub mod jobs;
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::CONTENT_TYPE;
