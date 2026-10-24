@@ -268,7 +268,8 @@ impl SessionClient {
         self.job_request(id, None, None)
     }
 
-    /// Run one logical step once. Duplicate calls return its durable state/result.
+    /// Request one dispatch attempt for a logical step; execution may not start.
+    /// Duplicate calls return the attempt's durable state/result.
     /// `Uncertain` is an outcome to reconcile, never an instruction to replay work.
     pub fn run_job_step(&self, id: &str, step: &str, expected_epoch: u64) -> io::Result<Job> {
         if !label(step) || !(1..=1024).contains(&expected_epoch) {

@@ -5,7 +5,7 @@ use std::{
     io::{self, Read, Write},
 };
 
-pub const USAGE: &str = "usage: jio job submit <plan.json> <idempotency-key> [--host host]\n       jio job status <job-id> [--host host]\n       jio job run <job-id> <step-id> <epoch> [--host host]\n       jio job cancel <job-id> [--host host]\n       jio job bind <job-id> <session-id> <generation> <epoch> [--host host]\n\nReturns JSON progress and durable results. Jobs use an existing owned session.\nEach step runs once; uncertain outcomes require reconciliation, never blind replay.\nBind supports the same session after retained restart at a completed step boundary.";
+pub const USAGE: &str = "usage: jio job submit <plan.json> <idempotency-key> [--host host]\n       jio job status <job-id> [--host host]\n       jio job run <job-id> <step-id> <epoch> [--host host]\n       jio job cancel <job-id> [--host host]\n       jio job bind <job-id> <session-id> <generation> <epoch> [--host host]\n\nReturns JSON progress and durable results. Jobs use an existing owned session.\nEach step has one dispatch attempt. A crash can prevent actual execution.\nUncertain outcomes require reconciliation, never blind replay.\nBind supports the same session after retained restart at a completed step boundary.";
 
 pub struct Options {
     host: String,
