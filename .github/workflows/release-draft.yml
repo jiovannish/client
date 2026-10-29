@@ -1,0 +1,39 @@
+name: Trusted release draft
+
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+
+jobs:
+  draft:
+    if: github.repository == 'jiovannish/client' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '["ubuntu-22.04"]') }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: jio-*
+          merge-multiple: true
+      - name: Create a draft for review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^    version=//p' install.sh)
+          test "$RELEASE_TAG" = "v$version"
+          cp install.sh install.ps1 dist/
+          cd dist
+          test "$(find . -name 'jio-*.tar.gz' | wc -l)" -eq 4
+          test "$(find . -name 'jio-*.zip' | wc -l)" -eq 1
+          sha256sum jio-*.tar.gz jio-*.zip install.sh install.ps1 > SHA256SUMS
+          gh release create "$RELEASE_TAG" --verify-tag --draft \
+            --title "Jio Client $RELEASE_TAG" \
+            --notes-file ../.github/release-notes.md \
+            jio-*.tar.gz jio-*.zip install.sh install.ps1 SHA256SUMS
