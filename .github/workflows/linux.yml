@@ -11,6 +11,9 @@ jobs:
     # This immutable workflow is the public runner group's trust boundary.
     if: github.repository == 'jiovannish/client' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '["ubuntu-22.04"]') }}
+    # Keep the shipped GNU binary runnable on the previous Ubuntu 22 baseline.
+    container:
+      image: rust:1.94.0-bullseye@sha256:16950191527a4cb9e0762d9d48b705a6315158e4035e64f7a93ce8656a1b053c
     timeout-minutes: 25
     env:
       CARGO_TERM_COLOR: always
@@ -38,6 +41,7 @@ jobs:
       - name: Build and package the native binary
         run: |
           cargo build --locked --release -p jio-cli --target "$TARGET"
+          "target/$TARGET/release/jio" --version
           cargo install --locked cargo-bundle-licenses --version 4.2.0
           bun run package:cli "$TARGET"
       - name: Test SDK with Bun
