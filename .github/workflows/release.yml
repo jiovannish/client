@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   linux:
-    uses: jiovannish/client/.github/workflows/linux.yml@91525f1b4184332764c5d23123c75d2605e6ad16
+    uses: jiovannish/client/.github/workflows/linux.yml@9af64c2fb7ca2009cc06f238ecbb7d9a4f9ead76
 
   build:
     defaults:
