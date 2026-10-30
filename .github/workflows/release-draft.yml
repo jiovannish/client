@@ -19,10 +19,10 @@ jobs:
       - name: Download and verify this run's bundles from owned storage
         run: |
           evidence_tool="$RUNNER_TEMP/ci-evidence.py"
-          curl --fail --silent --show-error --retry 2 https://46.105.119.217/tools/evidence-f38bfbc6c0412e022d9a7fbb9a8a024535ac6ee166306996a3e842cc1ba5aee3.py -o "$evidence_tool"
+          curl --fail --silent --show-error --retry 2 https://46.105.119.217/tools/evidence-d97a3aa9dcac72f55f0eea1c51c9a52e43479ece0c2e173e25355615b3eb823d.py -o "$evidence_tool"
           ci_python=python3
           if [ "$RUNNER_OS" = Windows ]; then ci_python=python; fi
-          "$ci_python" -c 'import hashlib,pathlib,sys; assert hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() == sys.argv[2]' "$evidence_tool" f38bfbc6c0412e022d9a7fbb9a8a024535ac6ee166306996a3e842cc1ba5aee3
+          "$ci_python" -c 'import hashlib,pathlib,sys; assert hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() == sys.argv[2]' "$evidence_tool" d97a3aa9dcac72f55f0eea1c51c9a52e43479ece0c2e173e25355615b3eb823d
           "$ci_python" "$evidence_tool" download --output dist
       - name: Create a draft for review
         env:
