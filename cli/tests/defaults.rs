@@ -49,6 +49,48 @@ fn no_connection_setup_is_required_but_an_api_key_still_is() -> io::Result<()> {
 struct TestDirectory(std::path::PathBuf);
 
 #[test]
+fn saved_credentials_reject_invalid_keys_and_other_endpoints_before_network_io() -> io::Result<()> {
+    let directory = TestDirectory::new("saved-credentials")?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let endpoint = format!("http://{}", listener.local_addr()?);
+    let credentials = directory.0.join("credentials");
+    for (saved_endpoint, key, message) in [
+        (endpoint.as_str(), "short", "API key must contain"),
+        (
+            "https://other.example.com",
+            "a".repeat(64).as_str(),
+            "different endpoint",
+        ),
+        (
+            "http://example.com",
+            "a".repeat(64).as_str(),
+            "plain HTTP is only allowed",
+        ),
+    ] {
+        let contents = format!("{saved_endpoint}\n{key}\n");
+        std::fs::write(&credentials, &contents)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600))?;
+        }
+        for command in ["usage", "list", "create"] {
+            let output = directory.command(&endpoint).arg(command).output()?;
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains(message));
+            assert!(
+                listener
+                    .accept()
+                    .is_err_and(|e| e.kind() == io::ErrorKind::WouldBlock)
+            );
+            assert_eq!(std::fs::read_to_string(&credentials)?, contents);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn invalid_domain_never_contacts_the_endpoint() -> io::Result<()> {
     let directory = TestDirectory::new("invalid-domain")?;
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;

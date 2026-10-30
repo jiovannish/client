@@ -1,4 +1,5 @@
 pub mod ingress;
+pub mod jobs;
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::CONTENT_TYPE;
@@ -350,6 +351,8 @@ pub enum ShutdownReason {
     HostStop,
     GuestReboot,
     GuestPoweroff,
+    /// The worker rebooted; retained state needs a new compute generation.
+    WorkerReboot,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1883,6 +1886,7 @@ mod tests {
             ("host_stop", super::ShutdownReason::HostStop),
             ("guest_reboot", super::ShutdownReason::GuestReboot),
             ("guest_poweroff", super::ShutdownReason::GuestPoweroff),
+            ("worker_reboot", super::ShutdownReason::WorkerReboot),
         ] {
             wire["shutdown_reason"] = serde_json::json!(reason);
             let stopped: Session = serde_json::from_value(wire.clone())?;
