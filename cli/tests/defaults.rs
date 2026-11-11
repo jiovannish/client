@@ -49,6 +49,141 @@ fn no_connection_setup_is_required_but_an_api_key_still_is() -> io::Result<()> {
 struct TestDirectory(std::path::PathBuf);
 
 #[test]
+fn aliases_resolve_to_ids_before_vm_operations() -> io::Result<()> {
+    use std::io::{BufRead, Read, Write};
+    use std::time::{Duration, Instant};
+    let directory = TestDirectory::new("aliases")?;
+    let id = "a".repeat(32);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let endpoint = format!("http://{}", listener.local_addr()?);
+    let server_id = id.clone();
+    let server = std::thread::spawn(move || -> io::Result<()> {
+        let requests = [
+            ("PUT", format!("/v1/sessions/{server_id}/alias"), 200),
+            ("GET", "/v1/aliases/dev".into(), 200),
+            ("POST", format!("/v0/sessions/{server_id}/exec"), 200),
+            ("GET", "/v1/aliases/dev".into(), 200),
+            ("GET", format!("/v1/sessions/{server_id}/ports"), 200),
+            ("GET", "/v1/aliases/dev".into(), 200),
+            ("GET", format!("/v0/sessions/{server_id}"), 404), // stop
+            ("GET", "/v1/aliases/dev".into(), 200),
+            ("GET", format!("/v0/sessions/{server_id}"), 404), // start
+            ("GET", "/v1/aliases/dev".into(), 200),
+            ("GET", format!("/v0/sessions/{server_id}"), 404), // connect
+            ("GET", "/v1/aliases/dev".into(), 200),
+            ("DELETE", format!("/v0/sessions/{server_id}"), 204),
+            ("GET", "/v1/aliases/missing".into(), 404),
+        ];
+        for (method, path, status) in requests {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e)
+                        if e.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10))
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+            stream.set_nonblocking(false)?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut reader = io::BufReader::new((&stream).take(8192));
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line)? == 0 || line == "\r\n" {
+                    break;
+                }
+                headers.push_str(&line);
+            }
+            assert!(
+                headers.starts_with(&format!("{method} {path} HTTP/1.1\r\n")),
+                "{headers}"
+            );
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .contains(&format!("authorization: bearer {}", "b".repeat(64)))
+            );
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| "0".into())
+                .parse()
+                .map_err(io::Error::other)?;
+            assert!(length < 4096);
+            let mut bytes = vec![0; length];
+            reader.read_exact(&mut bytes)?;
+            let request = String::from_utf8(bytes).map_err(io::Error::other)?;
+            let body = if status == 404 {
+                r#"{"error":"not found"}"#.to_owned()
+            } else if path.ends_with("/exec") {
+                let nonce = request
+                    .split("\"request_id\":\"")
+                    .nth(1)
+                    .and_then(|value| value.split('"').next())
+                    .ok_or_else(|| io::Error::other("missing nonce"))?;
+                assert!(jio_client::valid_session_id(nonce));
+                format!(
+                    r#"{{"request_id":"{nonce}","stdout":[111,107,10],"stderr":[],"exit_code":0,"signal":null,"timed_out":false,"output_limit":false}}"#
+                )
+            } else if path.ends_with("/ports") {
+                "[]".into()
+            } else if method == "DELETE" {
+                String::new()
+            } else {
+                if method == "PUT" {
+                    assert_eq!(request, r#"{"alias":"dev"}"#);
+                }
+                format!(r#"{{"session_id":"{server_id}","alias":"dev"}}"#)
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )?;
+        }
+        Ok(())
+    });
+    for (args, success) in [
+        (vec!["alias", &id, "dev"], true),
+        (vec!["exec", "dev", "printf ok"], true),
+        (vec!["ports", "dev"], true),
+        (vec!["stop", "dev"], false),
+        (vec!["start", "dev"], false),
+        (vec!["connect", "dev"], false),
+        (vec!["destroy", "dev", "--yes"], true),
+        (vec!["destroy", "missing", "--yes"], false),
+    ] {
+        let output = directory
+            .command(&endpoint)
+            .args(&args)
+            .env("JIO_API_KEY", "b".repeat(64))
+            .output()?;
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if args[0] == "exec" {
+            assert_eq!(output.stdout, b"ok\n");
+        }
+    }
+    server
+        .join()
+        .map_err(|_| io::Error::other("alias test endpoint failed"))??;
+    Ok(())
+}
+
+#[test]
 fn invalid_domain_never_contacts_the_endpoint() -> io::Result<()> {
     let directory = TestDirectory::new("invalid-domain")?;
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;

@@ -1,8 +1,8 @@
 use jio_client::{SessionClient, VmClient};
 use std::{ffi::OsString, io};
 
-pub const USAGE: &str = "usage: jio expose <port> [session-id] [--domain hostname] [--host host]\n       jio unexpose <port> [session-id] [--host host]\n       jio ports [session-id] [--host host]\n       jio domains add <hostname> <port> [session-id] [--host host]\n       jio domains status <hostname> [--host host]\n       jio domains remove <hostname> [--host host]\n\nexpose publishes HTTP, SSE and WebSockets only. For PostgreSQL or private TCP, use jio forward --help.";
-pub const FORWARD_USAGE: &str = "usage: jio forward <port> [session-id] [--local-port port] [--host host]\n\nForward local 127.0.0.1:<local-port> to guest 127.0.0.1:<port> over authenticated SSH.\nThe local port defaults to the guest port; the session defaults to the current VM.\nKeep this command running; Ctrl-C closes the forward. Requires a guest template\npermitting local SSH forwarding (older templates reject connections).\n\nPostgreSQL: jio forward 5432 --local-port 15432\nThen: psql -h 127.0.0.1 -p 15432 -U <database-user> -d <database>\nDatabase authentication is still required. No public URL is created.";
+pub const USAGE: &str = "usage: jio expose <port> [vm-id-or-alias] [--domain hostname] [--host host]\n       jio unexpose <port> [vm-id-or-alias] [--host host]\n       jio ports [vm-id-or-alias] [--host host]\n       jio domains add <hostname> <port> [vm-id-or-alias] [--host host]\n       jio domains status <hostname> [--host host]\n       jio domains remove <hostname> [--host host]\n\nexpose publishes HTTP, SSE and WebSockets only. For PostgreSQL or private TCP, use jio forward --help.";
+pub const FORWARD_USAGE: &str = "usage: jio forward <port> [vm-id-or-alias] [--local-port port] [--host host]\n\nForward local 127.0.0.1:<local-port> to guest 127.0.0.1:<port> over authenticated SSH.\nThe local port defaults to the guest port; the session defaults to the current VM.\nKeep this command running; Ctrl-C closes the forward. Requires a guest template\npermitting local SSH forwarding (older templates reject connections).\n\nPostgreSQL: jio forward 5432 --local-port 15432\nThen: psql -h 127.0.0.1 -p 15432 -U <database-user> -d <database>\nDatabase authentication is still required. No public URL is created.";
 pub struct Options {
     command: String,
     arguments: Vec<String>,
@@ -42,7 +42,7 @@ pub fn parse(
             s if command == "expose" && (s == "--local-port" || s.starts_with("--local-port=")) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "--local-port is only supported by jio forward.\nUse: jio forward <port> [session-id] --local-port <local-port>\njio expose creates a public HTTP URL; it does not bind a local port.",
+                    "--local-port is only supported by jio forward.\nUse: jio forward <port> [vm-id-or-alias] --local-port <local-port>\njio expose creates a public HTTP URL; it does not bind a local port.",
                 ));
             }
             s if s.starts_with('-') => {
