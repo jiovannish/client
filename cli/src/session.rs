@@ -53,11 +53,18 @@ pub fn list(host: String) -> io::Result<()> {
     print_vms(&mut output, &vms)
 }
 
+pub fn alias(host: String, id: &str, name: &str) -> io::Result<()> {
+    let api_key = crate::config::api_key(&host)?;
+    jio_client::SessionClient::new(host, api_key)?.set_alias(id, name)?;
+    println!("{name} -> {id}");
+    Ok(())
+}
+
 fn print_vms(output: &mut impl io::Write, vms: &[jio_client::VmSummary]) -> io::Result<()> {
     if vms.is_empty() {
         return writeln!(output, "No VMs.");
     }
-    writeln!(output, "VM ID                            - SIZE")?;
+    writeln!(output, "VM ID                            - ALIAS - SIZE")?;
     for vm in vms {
         let size = VmSize::ALL.into_iter().find(|size| {
             size.vcpus() == vm.vcpu_count && u64::from(size.memory_mib()) == vm.memory_mib
@@ -67,7 +74,12 @@ fn print_vms(output: &mut impl io::Write, vms: &[jio_client::VmSummary]) -> io::
         } else {
             format!("{} MiB", vm.memory_mib)
         };
-        write!(output, "{} - ", vm.id)?;
+        write!(
+            output,
+            "{} - {} - ",
+            vm.id,
+            vm.alias.as_deref().unwrap_or("-")
+        )?;
         if let Some(size) = size {
             write!(output, "{} · ", size.label())?;
         }
@@ -164,14 +176,15 @@ pub fn connect(host: String, id: Option<&str>) -> io::Result<()> {
 
 pub fn exec(host: String, id: &str, command: &str, timeout: Duration) -> io::Result<CommandResult> {
     let client = client(host)?;
+    let id = resolve_session_id(&client, Some(id))?;
     if timeout <= Duration::from_secs(30) && command.len() <= 4096 {
-        match client.exec_direct(id, command, timeout) {
+        match client.exec_direct(&id, command, timeout) {
             Ok(output) => return Ok(output),
             Err(error) if error.kind() == io::ErrorKind::Unsupported => {}
             Err(error) => return Err(error), // An uncertain command is never replayed.
         }
     }
-    client.attach(id)?.exec(command, timeout)
+    client.attach(&id)?.exec(command, timeout)
 }
 
 pub fn codex_login(host: String, id: Option<&str>) -> io::Result<(String, CommandResult)> {
@@ -243,11 +256,13 @@ pub fn target_session_id(host: &str, id: Option<&str>) -> io::Result<String> {
 }
 
 pub fn stop(host: String, id: &str) -> io::Result<Session> {
-    client(host)?.stop(id)
+    let client = client(host)?;
+    client.stop(&resolve_session_id(&client, Some(id))?)
 }
 
 pub fn start(host: String, id: &str) -> io::Result<Session> {
-    client(host)?.start(id)
+    let client = client(host)?;
+    client.start(&resolve_session_id(&client, Some(id))?)
 }
 
 fn client(host: String) -> io::Result<VmClient> {
@@ -257,13 +272,7 @@ fn client(host: String) -> io::Result<VmClient> {
 
 fn resolve_session_id(client: &VmClient, id: Option<&str>) -> io::Result<String> {
     if let Some(id) = id {
-        if !jio_client::valid_session_id(id) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "session ID is invalid",
-            ));
-        }
-        return Ok(id.to_owned());
+        return client.resolve_session_id(id);
     }
     client.current_session_id()?.ok_or_else(|| {
         io::Error::new(
@@ -387,12 +396,16 @@ mod tests {
             &mut output,
             &[jio_client::VmSummary {
                 id: "a".repeat(32),
+                alias: Some("dev".into()),
                 vcpu_count: 4,
                 memory_mib: 8192,
             }],
         )?;
         let text = String::from_utf8(output).map_err(std::io::Error::other)?;
-        assert!(text.contains(&format!("{} - Large · 4 vCPU · 8 GiB", "a".repeat(32))));
+        assert!(text.contains(&format!(
+            "{} - dev - Large · 4 vCPU · 8 GiB",
+            "a".repeat(32)
+        )));
         Ok(())
     }
 

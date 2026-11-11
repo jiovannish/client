@@ -15,6 +15,8 @@ use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod alias;
+pub use alias::valid_vm_alias;
 mod list;
 pub use list::VmSummary;
 

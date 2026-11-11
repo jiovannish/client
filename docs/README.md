@@ -134,6 +134,34 @@ creating another. A connection failure does not mean creation failed.
 `jio list` includes starting and stopped VMs. Listing needs an API key;
 connecting also needs the VM's local credentials on the machine that created it.
 
+### Name a VM
+
+```sh
+jio alias <vm-id> dev
+jio exec dev 'uname -a'
+jio connect dev
+jio stop dev
+jio start dev
+jio list
+```
+
+Aliases work wherever CLI commands accept a session ID, including fork, destroy,
+ports, expose, unexpose, forward, domains add, and the Codex commands. Names are
+stored by the server and shared across computers and API keys in the same
+account. SSH operations still require the VM's local credentials.
+
+Each VM has one alias. Run `jio alias <vm-id> <new-name>` to rename it. Names use
+1–63 characters: a lowercase letter followed by lowercase letters, digits, `_`
+or `-`; a 32-character hexadecimal VM ID cannot be a name. Another VM's name
+cannot be overwritten. Stopping retains the name; confirmed destruction or
+expiry releases it. Forked VMs start without an alias. `jio list` shows names
+alongside IDs. Existing ID commands still work against servers without alias
+support; alias commands require the updated hosted server.
+
+The Rust API exposes `SessionClient::set_alias(id, name)` and
+`SessionClient::resolve_session_id(name)`. Resolve once, then pass the returned ID
+to existing SDK operations. `VmClient` also exposes `resolve_session_id`.
+
 ### Fork a running VM
 
 ```sh

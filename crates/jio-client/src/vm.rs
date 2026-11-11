@@ -119,6 +119,11 @@ impl VmClient {
         self.api.endpoint()
     }
 
+    /// Resolves an account alias to the immutable ID used for local credentials.
+    pub fn resolve_session_id(&self, target: &str) -> io::Result<String> {
+        self.api.resolve_session_id(target)
+    }
+
     /// Returns the session selected by the most recent successful CLI create or connect.
     pub fn current_session_id(&self) -> io::Result<Option<String>> {
         let state = self.state_directory()?;

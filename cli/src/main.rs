@@ -19,6 +19,7 @@ const USAGE: &str = concat!(
     "\n",
     "  Command   Arguments\n",
     "  create    [options]                              Create a persistent VM\n",
+    "  alias     <vm-id> <name> [options]               Name a VM for this account\n",
     "  fork      [session-id] [options]                 Clone a running VM\n",
     "  config                                           Configure Jio defaults\n",
     "  expose    <port> [session-id] [--domain hostname] Publish an HTTP app\n",
@@ -27,7 +28,7 @@ const USAGE: &str = concat!(
     "  ports     [session-id]                           List public HTTP exposures\n",
     "  domains   add|status|remove                      Manage custom domains\n",
     "  usage     [options]                              Show account limits and reservations\n",
-    "  list      [options]                              List VM IDs and sizes\n",
+    "  list      [options]                              List VM IDs, aliases and sizes\n",
     "  exec      <session-id> <command> [options]       Run a command in a VM\n",
     "  connect   [session-id] [options]                 Open an interactive shell\n",
     "  stop      <session-id> [options]                 Stop compute and retain files\n",
@@ -64,7 +65,7 @@ const CREATE_USAGE: &str = concat!(
 
 const FORK_USAGE: &str = concat!(
     "usage: jio fork [session-id] [options]\n\n",
-    "  [session-id]               Source VM; defaults to the current session\n",
+    "  [session-id]               Source VM ID or alias; defaults to the current session\n",
     "  --host <host>              Override JIO_ENDPOINT or JIO_HOST\n\n",
     "Clone a running VM with its files, processes and SSH keys. Selects the child.\n",
     "Requires local source credentials and capacity for another VM of the same size.",
@@ -91,13 +92,21 @@ const UPDATE_USAGE: &str = concat!(
 const LIST_USAGE: &str = concat!(
     "usage: jio list [options]\n\n",
     "  --host <host>              Override JIO_ENDPOINT or JIO_HOST\n\n",
-    "List non-destroyed VMs and sizes for the current API key's account.",
+    "List non-destroyed VM IDs, aliases and sizes for the current API key's account.",
+);
+
+const ALIAS_USAGE: &str = concat!(
+    "usage: jio alias <vm-id> <name> [--host host]\n\n",
+    "Assign or replace a VM's account-wide alias. Names use 1..63 characters:\n",
+    "a lowercase letter, then lowercase letters, digits, dash or underscore.\n",
+    "VM IDs are reserved; another VM's alias cannot be overwritten.\n",
+    "Use the alias wherever a command takes a session ID."
 );
 
 const EXEC_USAGE: &str = concat!(
     "usage: jio exec <session-id> <command> [options]\n",
     "\n",
-    "  <session-id>               VM session ID\n",
+    "  <session-id>               VM ID or alias\n",
     "  <command>                  Quoted shell command to run\n",
     "  --timeout <seconds>        Command timeout (default: 30; above 30 uses SSH)\n",
     "  --host <host>              Override JIO_ENDPOINT or JIO_HOST",
@@ -106,28 +115,28 @@ const EXEC_USAGE: &str = concat!(
 const CONNECT_USAGE: &str = concat!(
     "usage: jio connect [session-id] [options]\n",
     "\n",
-    "  [session-id]               VM session ID; defaults to the current session\n",
+    "  [session-id]               VM ID or alias; defaults to the current session\n",
     "  --host <host>              Override JIO_ENDPOINT or JIO_HOST",
 );
 
 const STOP_USAGE: &str = concat!(
     "usage: jio stop <session-id> [options]\n",
     "\n",
-    "  <session-id>               VM session ID\n",
+    "  <session-id>               VM ID or alias\n",
     "  --host <host>              Override JIO_ENDPOINT or JIO_HOST",
 );
 
 const START_USAGE: &str = concat!(
     "usage: jio start <session-id> [options]\n",
     "\n",
-    "  <session-id>               VM session ID\n",
+    "  <session-id>               VM ID or alias\n",
     "  --host <host>              Override JIO_ENDPOINT or JIO_HOST",
 );
 
 const DESTROY_USAGE: &str = concat!(
     "usage: jio destroy [session-id] [options]\n",
     "\n",
-    "  [session-id]               VM session ID; defaults to the current session\n",
+    "  [session-id]               VM ID or alias; defaults to the current session\n",
     "  --yes                      Skip the destructive-action confirmation\n",
     "  --host <host>              Override JIO_ENDPOINT or JIO_HOST",
 );
@@ -142,7 +151,7 @@ const LOGIN_USAGE: &str = concat!(
     "  Agent     Arguments\n",
     "  codex     [session-id] [options]                 Use local Codex login in a VM\n",
     "\n",
-    "  [session-id]               VM session ID; defaults to the current session\n",
+    "  [session-id]               VM ID or alias; defaults to the current session\n",
     "  --host <host>              Override JIO_ENDPOINT or JIO_HOST",
 );
 
@@ -152,7 +161,7 @@ const YOLO_USAGE: &str = concat!(
     "  Agent     Arguments\n",
     "  codex     [session-id] [options]                 Open Codex without approvals or sandbox\n",
     "\n",
-    "  [session-id]               VM session ID; defaults to the current session\n",
+    "  [session-id]               VM ID or alias; defaults to the current session\n",
     "  --host <host>              Override JIO_ENDPOINT or JIO_HOST\n",
     "\n",
     "Transfers the local Codex login, then opens Codex with approvals and its sandbox disabled.",
@@ -176,7 +185,7 @@ fi
 
 _jio() {
   local -a commands agents shells options
-  commands=(create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains forward completion update)
+  commands=(create fork config alias usage list exec connect stop start destroy login yolo expose unexpose ports domains forward completion update)
   agents=(codex)
   shells=(zsh bash fish)
 
@@ -218,7 +227,7 @@ _jio() {
     create)
       options=(--exec --host --help -h)
       ;;
-    usage|list|fork|connect|stop|start)
+    alias|usage|list|fork|connect|stop|start)
       options=(--host --help -h)
       ;;
   esac
@@ -235,7 +244,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
   command="${COMP_WORDS[1]}"
 
   if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=($(compgen -W 'create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains forward completion update' -- "$current"))
+    COMPREPLY=($(compgen -W 'create fork config alias usage list exec connect stop start destroy login yolo expose unexpose ports domains forward completion update' -- "$current"))
     return
   fi
   if [[ $COMP_CWORD -eq 2 && ( $command == login || $command == yolo ) ]]; then
@@ -254,7 +263,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
     forward)   COMPREPLY=($(compgen -W '--local-port --host --help -h' -- "$current")) ;;
     destroy)   COMPREPLY=($(compgen -W '--yes --host --help -h' -- "$current")) ;;
     create)    COMPREPLY=($(compgen -W '--exec --host --help -h' -- "$current")) ;;
-    usage|list|login|yolo|fork|connect|stop|start)
+    alias|usage|list|login|yolo|fork|connect|stop|start)
                COMPREPLY=($(compgen -W '--host --help -h' -- "$current")) ;;
   esac
 }
@@ -262,7 +271,7 @@ const BASH_COMPLETION: &str = r#"_jio_completion() {
 complete -F _jio_completion jio"#;
 
 const FISH_COMPLETION: &str = r#"complete -c jio -f
-complete -c jio -n '__fish_use_subcommand' -a 'create fork config usage list exec connect stop start destroy login yolo expose unexpose ports domains forward completion update'
+complete -c jio -n '__fish_use_subcommand' -a 'create fork config alias usage list exec connect stop start destroy login yolo expose unexpose ports domains forward completion update'
 complete -c jio -n '__fish_seen_subcommand_from login yolo; and test (count (commandline -opc)) -eq 2' -a codex
 complete -c jio -n '__fish_seen_subcommand_from completion; and test (count (commandline -opc)) -eq 2' -a 'zsh bash fish'
 complete -c jio -n '__fish_seen_subcommand_from run' -l language -l instances -l concurrency -l host
@@ -270,7 +279,7 @@ complete -c jio -n '__fish_seen_subcommand_from exec' -l timeout -l host
 complete -c jio -n '__fish_seen_subcommand_from create' -l exec -l host
 complete -c jio -n '__fish_seen_subcommand_from forward' -l local-port -l host
 complete -c jio -n '__fish_seen_subcommand_from destroy' -l yes -l host
-complete -c jio -n '__fish_seen_subcommand_from usage list create fork connect stop start login yolo' -l host"#;
+complete -c jio -n '__fish_seen_subcommand_from alias usage list create fork connect stop start login yolo' -l host"#;
 
 enum Invocation {
     Ingress(ingress::Options),
@@ -292,6 +301,11 @@ enum Invocation {
     Fork {
         host: String,
         id: Option<String>,
+    },
+    Alias {
+        host: String,
+        id: String,
+        name: String,
     },
     Config,
     Update,
@@ -391,6 +405,7 @@ fn execute(invocation: Invocation) -> io::Result<()> {
             }
         }
         Invocation::Fork { host, id } => fork(host, id.as_deref()),
+        Invocation::Alias { host, id, name } => session::alias(host, &id, &name),
         Invocation::Config => config::run(),
         Invocation::Update => update::run(),
         Invocation::Usage { host } => session::usage(host),
@@ -608,6 +623,7 @@ fn options_from(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
                 None => Ok(Invocation::Help(FORK_USAGE)),
             }
         }
+        Some(command) if command == OsStr::new("alias") => alias_options(arguments),
         Some(command) if command == OsStr::new("config") => config_options(arguments),
         Some(command) if command == OsStr::new("update") => match arguments.next() {
             None => Ok(Invocation::Update),
@@ -632,6 +648,23 @@ fn options_from(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
         Some(command) if command == OsStr::new("completion") => completion_options(arguments),
         _ => Err(usage(USAGE)),
     }
+}
+
+fn alias_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invocation> {
+    let first = arguments.next();
+    if first.as_deref().is_some_and(is_help) {
+        return Ok(Invocation::Help(ALIAS_USAGE));
+    }
+    let id = text(first, "VM ID", ALIAS_USAGE)?;
+    let name = text(arguments.next(), "alias", ALIAS_USAGE)?;
+    if !jio_client::valid_session_id(&id) || !jio_client::valid_vm_alias(&name) {
+        return Err(usage(ALIAS_USAGE));
+    }
+    host_options(arguments, ALIAS_USAGE, |host| Invocation::Alias {
+        host,
+        id,
+        name,
+    })
 }
 
 fn login_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Invocation> {
@@ -737,10 +770,10 @@ fn optional_session_target(
             host = Some(arguments.next().ok_or_else(|| usage(command_usage))?);
         } else if id.is_none() {
             let value = text(Some(argument), "session ID", command_usage)?;
-            if !jio_client::valid_session_id(&value) {
+            if !jio_client::valid_session_id(&value) && !jio_client::valid_vm_alias(&value) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "session ID is invalid",
+                    "VM ID or alias is invalid",
                 ));
             }
             id = Some(value);
@@ -835,10 +868,10 @@ fn exec_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<Inv
         return Ok(Invocation::Help(EXEC_USAGE));
     }
     let id = text(first, "session ID", EXEC_USAGE)?;
-    if !jio_client::valid_session_id(&id) {
+    if !jio_client::valid_session_id(&id) && !jio_client::valid_vm_alias(&id) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "session ID is invalid",
+            "VM ID or alias is invalid",
         ));
     }
     let command = text(arguments.next(), "command", EXEC_USAGE)?;
@@ -921,10 +954,10 @@ fn destroy_options(mut arguments: impl Iterator<Item = OsString>) -> io::Result<
             yes = true;
         } else if id.is_none() {
             let value = text(Some(argument), "session ID", DESTROY_USAGE)?;
-            if !jio_client::valid_session_id(&value) {
+            if !jio_client::valid_session_id(&value) && !jio_client::valid_vm_alias(&value) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "session ID is invalid",
+                    "VM ID or alias is invalid",
                 ));
             }
             id = Some(value);
@@ -955,10 +988,10 @@ fn session_options(
         return Ok(Invocation::Help(command_usage));
     }
     let id = text(first, "session ID", command_usage)?;
-    if !jio_client::valid_session_id(&id) {
+    if !jio_client::valid_session_id(&id) && !jio_client::valid_vm_alias(&id) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "session ID is invalid",
+            "VM ID or alias is invalid",
         ));
     }
     let mut host = None;
@@ -1053,7 +1086,7 @@ fn usage(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        ACCOUNT_USAGE, COMPLETION_USAGE, CONFIG_USAGE, CONNECT_USAGE, CREATE_USAGE,
+        ACCOUNT_USAGE, ALIAS_USAGE, COMPLETION_USAGE, CONFIG_USAGE, CONNECT_USAGE, CREATE_USAGE,
         CompletionShell, DESTROY_USAGE, EXEC_USAGE, FORK_USAGE, Invocation, LIST_USAGE,
         LOGIN_USAGE, RUN_USAGE, START_USAGE, STOP_USAGE, UPDATE_USAGE, USAGE, YOLO_USAGE,
         options_from, prompt_connect, prompt_destroy,
@@ -1071,6 +1104,48 @@ mod tests {
         ]
         .into_iter()
         .map(OsString::from)
+    }
+
+    #[test]
+    fn aliases_are_accepted_for_all_vm_commands() -> std::io::Result<()> {
+        let id = "ab".repeat(16);
+        assert!(
+            matches!(options_from(["alias", &id, "dev", "--host", "http://127.0.0.1:8080"].into_iter().map(OsString::from))?,
+            Invocation::Alias { name, .. } if name == "dev")
+        );
+        for args in [
+            vec!["alias", &id],
+            vec!["alias", "dev", "new"],
+            vec!["alias", &id, "UPPER"],
+            vec!["alias", &id, "dev", "extra"],
+        ] {
+            assert!(options_from(args.into_iter().map(OsString::from)).is_err());
+        }
+        for args in [
+            vec!["connect", "dev"],
+            vec!["fork", "dev"],
+            vec!["stop", "dev"],
+            vec!["start", "dev"],
+            vec!["destroy", "dev"],
+            vec!["exec", "dev", "pwd"],
+            vec!["login", "codex", "dev"],
+            vec!["yolo", "codex", "dev"],
+            vec!["ports", "dev"],
+            vec!["expose", "3000", "dev"],
+            vec!["unexpose", "3000", "dev"],
+            vec!["forward", "5432", "dev"],
+            vec!["domains", "add", "app.example.org", "3000", "dev"],
+        ] {
+            assert!(options_from(args.into_iter().map(OsString::from)).is_ok());
+        }
+        for shell in [
+            CompletionShell::Zsh,
+            CompletionShell::Bash,
+            CompletionShell::Fish,
+        ] {
+            assert!(shell.script().contains("config alias usage"));
+        }
+        Ok(())
     }
 
     #[test]
@@ -1150,7 +1225,7 @@ mod tests {
             ),
             Ok(Invocation::Fork { id: None, .. })
         ));
-        assert!(options_from(["fork", "invalid"].into_iter().map(OsString::from)).is_err());
+        assert!(options_from(["fork", "invalid/name"].into_iter().map(OsString::from)).is_err());
         assert!(
             options_from(["fork", "--size", "xlarge"].into_iter().map(OsString::from)).is_err()
         );
@@ -1370,6 +1445,7 @@ mod tests {
     #[test]
     fn incomplete_commands_show_their_own_usage() {
         for (command, expected) in [
+            ("alias", ALIAS_USAGE),
             ("run", RUN_USAGE),
             ("exec", EXEC_USAGE),
             ("stop", STOP_USAGE),
@@ -1388,6 +1464,7 @@ mod tests {
     #[test]
     fn every_command_supports_help() {
         for (command, expected) in [
+            ("alias", ALIAS_USAGE),
             ("run", RUN_USAGE),
             ("create", CREATE_USAGE),
             ("fork", FORK_USAGE),

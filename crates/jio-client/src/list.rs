@@ -6,6 +6,7 @@ use std::{io, time::Instant};
 #[derive(Debug)]
 pub struct VmSummary {
     pub id: String,
+    pub alias: Option<String>,
     pub vcpu_count: u8,
     pub memory_mib: u64,
 }
@@ -19,6 +20,7 @@ struct Page {
 #[derive(Deserialize)]
 struct Entry {
     id: String,
+    alias: Option<String>,
     state: String,
     release: Resources,
 }
@@ -63,6 +65,10 @@ impl SessionClient {
             let mut last = after.as_str();
             for entry in &page.sessions {
                 if !valid_session_id(&entry.id)
+                    || entry
+                        .alias
+                        .as_deref()
+                        .is_some_and(|name| !crate::valid_vm_alias(name))
                     || entry.id.as_str() <= last
                     || entry.release.vcpu == 0
                     || !(1..=16_777_216).contains(&entry.release.memory_mib)
@@ -90,6 +96,7 @@ impl SessionClient {
                     .filter(|entry| entry.state != "destroyed")
                     .map(|entry| VmSummary {
                         id: entry.id,
+                        alias: entry.alias,
                         vcpu_count: entry.release.vcpu,
                         memory_mib: entry.release.memory_mib,
                     }),
@@ -122,6 +129,11 @@ mod tests {
             serde_json::json!({"id":id,"state":state,
             "release":{"vcpu":4,"memory_mib":8192}})
         };
+        let named = |name: &str| {
+            let mut vm = entry(&b, "stopped");
+            vm["alias"] = serde_json::json!(name);
+            vm
+        };
         for (pages, valid) in [
             (
                 vec![
@@ -131,7 +143,7 @@ mod tests {
                     ),
                     (
                         200,
-                        serde_json::json!({"sessions":[entry(&b,"stopped")],"next_after":null}),
+                        serde_json::json!({"sessions":[named("dev")],"next_after":null}),
                     ),
                 ],
                 true,
@@ -158,6 +170,13 @@ mod tests {
                 vec![(
                     200,
                     serde_json::json!({"sessions":[entry(&a,"ready"),entry(&a,"ready")],"next_after":null}),
+                )],
+                false,
+            ),
+            (
+                vec![(
+                    200,
+                    serde_json::json!({"sessions":[named("dev\u{1b}")],"next_after":null}),
                 )],
                 false,
             ),
@@ -216,6 +235,7 @@ mod tests {
                 assert_eq!(vms.len(), expected_count);
                 if let Some(vm) = vms.first() {
                     assert_eq!((&vm.id, vm.vcpu_count, vm.memory_mib), (&b, 4, 8192));
+                    assert_eq!(vm.alias.as_deref(), Some("dev"));
                 }
             } else {
                 assert!(result.is_err());
