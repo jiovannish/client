@@ -405,9 +405,11 @@ pub fn install_helper(
     payload.extend_from_slice(&data);
     let installed = vm.exec_with_input(&command, Some(&payload), Duration::from_secs(120))?;
     if !installed.success() {
-        return Err(io::Error::other(
-            "helper transfer, version verification or startup failed",
-        ));
+        return Err(io::Error::other(format!(
+            "ingress helper installation exited with {}: {}",
+            installed.exit_code,
+            String::from_utf8_lossy(&installed.stderr).trim()
+        )));
     }
     Ok(())
 }

@@ -1356,7 +1356,7 @@ fn run_bounded(
     let stderr = join_reader(stderr_thread)?;
     if let Some(input_thread) = input_thread {
         match input_thread.join() {
-            Ok(result) if status.is_ok() => result?,
+            Ok(result) if status.as_ref().is_ok_and(|status| status.success()) => result?,
             Ok(_) => {}
             Err(_) => return Err(io::Error::other("command input worker failed")),
         }
@@ -2584,6 +2584,32 @@ mod tests {
         assert_eq!(result.stdout, vec![0, 1, 2, 255]);
         assert!(result.stderr.is_empty());
         assert!(result.success());
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn preserves_child_failure_when_input_pipe_closes() -> io::Result<()> {
+        for code in [0, 23] {
+            let mut command = Command::new("sh");
+            command.args([
+                "-c",
+                &format!("exec 0<&-; printf 'staging denied' >&2; exit {code}"),
+            ]);
+            let result = run_bounded(
+                command,
+                Some(vec![0; 1024 * 1024]),
+                Duration::from_secs(2),
+                128,
+            );
+            if code == 0 {
+                assert!(result.is_err_and(|error| error.kind() == io::ErrorKind::BrokenPipe));
+            } else {
+                let result = result?;
+                assert_eq!(result.exit_code, code);
+                assert_eq!(result.stderr, b"staging denied");
+            }
+        }
         Ok(())
     }
 
